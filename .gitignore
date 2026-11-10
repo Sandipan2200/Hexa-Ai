@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+hexa.log
+hexa.db
+models/
+*.onnx
+*.onnx.json
+check_audio.py
+check_models.py

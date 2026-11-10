@@ -1,0 +1,75 @@
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_size: 1280
+  input_device: null
+wake_word:
+  enabled: true
+  model_name: hey_jarvis
+  inference_framework: onnx
+  threshold: 0.5
+  debounce_time: 1.0
+hotkey:
+  enabled: true
+  key: <ctrl>+<alt>+<space>
+stt:
+  model: small.en
+  device: cpu
+  compute_type: int8
+  language: en
+  beam_size: 5
+  vad_threshold: 0.5
+tts:
+  voice: en_GB-alan-medium
+  voice_path: models/en_GB-alan-medium.onnx
+  sample_rate: 22050
+  fallback: pyttsx3
+llm:
+  model: hexa-brain
+  host: http://localhost:11434
+  num_ctx: 3072
+  temperature: 0.2
+  keep_alive: -1
+  max_history: 6
+  system_prompt: You are Hexa, a concise offline desktop assistant. Use tools for
+    actions. Reply in at most 2 short sentences.
+memory:
+  db_path: hexa.db
+api:
+  host: 127.0.0.1
+  port: 8000
+  bearer_token: etwj9LUKrbpz44wwS50JlGu4lW0-fKvu54-ds7csnqc
+apps:
+  notepad: notepad.exe
+  calculator: calc.exe
+  explorer: explorer.exe
+  cmd: cmd.exe
+  powershell: powershell.exe
+  vscode: code.exe
+  chrome: chrome.exe
+sites:
+  youtube: https://www.youtube.com
+  gmail: https://mail.google.com
+  github: https://github.com
+  chatgpt: https://chat.openai.com
+  claude: https://claude.ai
+  whatsapp: https://web.whatsapp.com
+  localhost: http://localhost:8000
+search_templates:
+  youtube: https://www.youtube.com/results?search_query={query}
+  google: https://www.google.com/search?q={query}
+  github: https://github.com/search?q={query}
+  stackoverflow: https://stackoverflow.com/search?q={query}
+  maps: https://www.google.com/maps/search/{query}
+  amazon: https://www.amazon.com/s?k={query}
+tool_permissions:
+  open_app: safe
+  open_tabs: safe
+  search: safe
+  get_time: safe
+  system_status: safe
+  remember: safe
+  recall: safe
+  set_timer: safe
+  dummy_destructive: confirm
+  dummy_blocked: blocked
