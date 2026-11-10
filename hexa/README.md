@@ -13,6 +13,7 @@ A 100% offline, privacy-first voice assistant for Windows. No cloud APIs, no tel
 - **API**: FastAPI on 127.0.0.1 with bearer token auth
 - **Memory**: SQLite for notes/facts
 - **Tools**: Open apps, browser tabs, search, system status, timers, memory
+- **App Discovery (Phase 8)**: Automatic discovery of installed Windows applications from Start Menu, Registry, App Paths, Microsoft Store, and System32; intelligent matching with aliases and fuzzy fallback; preferred apps for generic requests like "open my browser"
 
 ### How tool calling works (wire format)
 
@@ -169,6 +170,96 @@ Everything else goes to the local LLM with tool calling:
 - `what's the difference between a list and a tuple`
 - `yo pull up flutter provider tutorial on google`
 
+## App Discovery (Phase 8)
+
+Hexa can automatically discover installed applications on Windows and launch them by name or natural-language description.
+
+### Discovery Sources
+
+Applications are discovered from trusted Windows sources only (no full-drive scanning):
+
+1. **Start Menu shortcuts** — `.lnk` files in `ProgramData\Microsoft\Windows\Start Menu\Programs` and user `AppData`
+2. **Registry Uninstall keys** — HKLM/HKCU `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` (both 32-bit and 64-bit views)
+3. **App Paths registry** — `SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths`
+4. **Microsoft Store / UWP apps** — Packaged applications via `Get-AppxPackage`
+5. **Well-known System32 executables** — Notepad, Calculator, Paint, Terminal, Control Panel, etc.
+6. **User-approved portable folders** — (Configurable, optional)
+
+### Intelligent Matching
+
+When you say "open X", Hexa matches in priority order:
+
+1. Exact application ID
+2. Exact display name
+3. Normalized name (lowercase, alphanumeric only)
+4. Configured aliases (e.g., "code" → "Visual Studio Code", "chrome" → "Google Chrome")
+5. Prefix match on normalized name
+6. Fuzzy match (typo-tolerant) above threshold
+
+If multiple apps match closely, Hexa asks which one you mean instead of launching the wrong one.
+
+### Preferred Apps for Generic Requests
+
+Configure preferred apps for categories so generic requests work:
+
+- "open my browser" → launches your preferred browser
+- "open my editor" → launches your preferred code editor
+- "open my terminal" → launches your preferred terminal
+- "open my music player" → launches your preferred music app
+
+Configure with `set preferred app <category> <app_name>` (categories: browser, editor, terminal, music, video, pdf, image, email).
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `refresh apps` | Re-scan Windows for installed applications (5-15s) |
+| `list apps` | Show discovered applications with sources |
+| `open <name>` | Launch an app by name (uses intelligent matching) |
+| `set preferred app <category> <app>` | Set preferred app for a category |
+| `get preferred apps` | Show all preferred app mappings |
+
+### Examples
+
+```
+> refresh apps
+Discovered and indexed 112 applications from 4 sources.
+
+> open notepad
+Opened Notepad
+
+> open code
+Opened Visual Studio Code
+
+> open browser
+Opened Google Chrome  (uses preferred browser)
+
+> set preferred app editor code
+Set Visual Studio Code as preferred editor.
+
+> get preferred apps
+Preferred applications:
+  browser: Google Chrome
+  editor: Visual Studio Code
+```
+
+### Safety & Security
+
+- Only launches applications present in the discovered index or legacy config.yaml whitelist
+- Never trusts arbitrary executable paths from the LLM
+- No `shell=True` — uses `subprocess.Popen([exe_path])` with list arguments
+- Validates executable exists before launching
+- Handles UWP apps via `explorer.exe shell:AppsFolder\<AUMID>`
+- Graceful handling of missing executables and launch failures
+
+### Offline Guarantee
+
+Discovery is 100% local:
+- No network requests during discovery
+- Uses only Windows APIs (Registry, WMI, PowerShell, file system)
+- Results cached in local SQLite (`hexa.db`)
+- `refresh apps` runs in background, doesn't block voice interaction
+
 ## Project Structure
 
 ```
@@ -190,22 +281,24 @@ hexa/
 │   ├── memory.py        # SQLite notes/facts
 │   ├── api.py           # FastAPI REST + WebSocket
 │   └── tools/           # Tool registry + implementations
-│       ├── apps.py      # open_app
+│       ├── apps.py      # open_app, refresh_apps, list_apps, preferred apps
+│       ├── app_discovery.py  # Windows app discovery (Phase 8)
+│       ├── app_index.py      # Persistent app index + matching (Phase 8)
 │       ├── browser.py   # open_tabs, search
 │       ├── system.py    # get_time, system_status
 │       ├── notes.py     # remember, recall
 │       └── timers.py    # set_timer, dummy tools
-└── tests/               # 161 unit tests
+└── tests/               # 185 unit tests
 ```
 
 ## Configuration
 
 Edit `hexa/config.yaml` to customize:
 
-- `apps` whitelist for `open_app`
+- `apps` whitelist for `open_app` (legacy, still supported)
 - `sites` whitelist for `open_tabs`
 - `search_templates` for search URLs
-- `tool_permissions`: "safe", "confirm", "blocked"
+- `tool_permissions`: "safe", "confirm", "blocked" (includes new tools: `refresh_apps`, `list_apps`, `set_preferred_app`, `get_preferred_apps`)
 - Audio, wake word, STT, TTS, LLM settings
 
 Note: config overrides require a restart (`HEXA_*` env overrides apply to
@@ -217,11 +310,14 @@ top-level fields only; nested fields like `llm.host` must be edited in YAML).
 .venv\Scripts\python.exe -m pytest hexa/tests/ -v
 ```
 
-161 tests passing, 0 skipped: config, launch port-guard, router fast-path (20+ phrases), full
+185 tests passing, 0 skipped: config, launch port-guard, router fast-path (20+ phrases), full
 native tool-calling cycle (execution, result feedback, final reply, invalid
 tool name/args, blocked tools, round cap, LLM 400/unreachable fallbacks),
 LLM client (envelope wrapping, keep_alive kwarg, typed errors, history),
 offline guarantees (env vars, local_files_only, no cloud endpoints,
 GPU-residency three states), tools, registry schemas, permissions, memory,
 event bus, state machine, API auth, audio stream, wake word, hotkey, STT,
-VAD, TTS (incl. interrupt/deadlock regression), voice pipeline.
+VAD, TTS (incl. interrupt/deadlock regression), voice pipeline,
+**app discovery (Start Menu, Registry, App Paths, Store, System32), app index
+persistence, name normalization, alias matching, fuzzy matching, ambiguous
+matches, missing executables, safe launching, refresh/caching, preferred apps**.

@@ -78,5 +78,9 @@ tool_permissions:
   remember: safe
   recall: safe
   set_timer: safe
+  refresh_apps: safe
+  list_apps: safe
+  set_preferred_app: safe
+  get_preferred_apps: safe
   dummy_destructive: confirm
   dummy_blocked: blocked

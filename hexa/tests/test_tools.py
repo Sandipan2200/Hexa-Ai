@@ -140,10 +140,21 @@ def test_open_app_tool() -> None:
 
     hexa.tools.apps.get_config = lambda: MockConfig()
 
-    with patch("subprocess.Popen") as mock_popen:
+    # Clear the app index to avoid interference from previous test runs
+    from hexa.tools.app_index import get_app_index
+    index = get_app_index()
+    index.clear()
+
+    # Mock both Path.exists and subprocess.Popen
+    with patch("pathlib.Path.exists", return_value=True), \
+         patch("subprocess.Popen") as mock_popen:
         result = open_app("notepad")
-        assert "Opened notepad" in result
-        mock_popen.assert_called_once_with("notepad.exe", shell=True)
+        assert "opened notepad" in result.lower()  # Case-insensitive since display name is "Notepad"
+        # New implementation uses list args, no shell=True
+        mock_popen.assert_called_once()
+        args, kwargs = mock_popen.call_args
+        assert args[0] == ["notepad.exe"]
+        assert "shell" not in kwargs or kwargs.get("shell") is False
 
     # Unknown app
     result = open_app("unknown")
