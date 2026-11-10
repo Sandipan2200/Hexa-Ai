@@ -125,14 +125,19 @@ class TestVoicePipeline:
 
             pipeline.stop()
 
-    @pytest.mark.skip(reason="Timeout issue - needs investigation")
     def test_pipeline_conversation_mode(self) -> None:
-        """Test conversation mode keeps listening after response."""
+        """Test conversation mode keeps listening after response.
+
+        Deterministic full-flow test: wake word -> VAD ends (TRANSCRIBING)
+        -> on_transcript callback -> router reply -> speak -> back to
+        LISTENING instead of IDLE (conversation mode active).
+        """
         with patch("hexa.voice.TTSManager") as mock_tts_class, \
-             patch("hexa.voice.SpeechRecognizer"), \
-             patch("hexa.voice.WakeWordDetector"), \
+             patch("hexa.voice.SpeechRecognizer") as mock_recognizer_class, \
+             patch("hexa.voice.WakeWordDetector") as mock_wake_class, \
              patch("hexa.voice.HotkeyListener"), \
              patch("hexa.voice.get_audio_stream"), \
+             patch("hexa.voice.get_router") as mock_get_router, \
              patch("hexa.voice.get_config") as mock_config:
 
             mock_config.return_value = MagicMock(
@@ -144,6 +149,10 @@ class TestVoicePipeline:
                 conversation=MagicMock(enabled=True, timeout=10.0)
             )
 
+            mock_router = MagicMock()
+            mock_router.route.return_value = "It's 10:00."
+            mock_get_router.return_value = mock_router
+
             mock_tts = MagicMock()
             mock_tts_class.return_value = mock_tts
             mock_handle = MagicMock()
@@ -152,39 +161,28 @@ class TestVoicePipeline:
             pipeline = VoicePipeline()
             pipeline.start()
 
-            # Simulate wake -> transcript -> response
             state_machine = get_state_machine()
 
-            # Wake word
-            wake_callback = None
-            for call in mock_config.return_value.wake_word:
-                pass
+            # 1. Wake word detected -> conversation mode on, LISTENING
+            wake_callback = mock_wake_class.call_args[1]["on_wake"]
+            wake_callback()
+            assert state_machine.current_state == State.LISTENING
 
-            # Get the wake callback
-            with patch("hexa.voice.WakeWordDetector") as mock_wake:
-                mock_wake_instance = MagicMock()
-                mock_wake.return_value = mock_wake_instance
+            # 2. VAD ends speech -> TRANSCRIBING (normally driven by stt.py)
+            state_machine.transition(State.TRANSCRIBING)
 
-                pipeline = VoicePipeline()
-                pipeline.start()
+            # 3. Transcript arrives -> router -> TTS -> conversation LISTENING
+            transcript_callback = mock_recognizer_class.call_args[1]["on_transcript"]
+            transcript_callback("what time is it")
 
-                wake_callback = mock_wake.call_args[1]["on_wake"]
-                wake_callback()
+            # Router was used with the spoken question
+            mock_router.route.assert_called_once_with("what time is it")
+            # Reply was spoken and playback waited for completion
+            mock_tts.speak.assert_called_once_with("It's 10:00.")
+            mock_handle.wait.assert_called_once()
 
-                # Simulate transcript
-                transcript_callback = None
-                with patch("hexa.voice.SpeechRecognizer") as mock_recognizer_class:
-                    mock_recognizer = MagicMock()
-                    mock_recognizer_class.return_value = mock_recognizer
-
-                    pipeline = VoicePipeline()
-                    pipeline.start()
-
-                    transcript_callback = mock_recognizer_class.call_args[1]["on_transcript"]
-                    transcript_callback("what time is it")
-
-                    # Should have spoken and be in conversation mode
-                    mock_handle.wait.assert_called()
+            # Conversation mode: after speaking, back to LISTENING, not IDLE
+            assert state_machine.current_state == State.LISTENING
 
             pipeline.stop()
 

@@ -71,7 +71,7 @@ class TestWhisperTranscriber:
         with patch("faster_whisper.WhisperModel") as mock_model_class:
             transcriber = WhisperTranscriber(stt_config)
             mock_model_class.assert_called_once_with(
-                "small.en", device="cpu", compute_type="int8"
+                "small.en", device="cpu", compute_type="int8", local_files_only=True
             )
 
     def test_transcriber_empty_chunks(self, stt_config: STTConfig) -> None:

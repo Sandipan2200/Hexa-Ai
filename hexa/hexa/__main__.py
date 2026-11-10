@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -22,36 +24,130 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler("hexa.log"),
+        logging.FileHandler("hexa.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
 logger = logging.getLogger(__name__)
 
+# Human-readable status labels for the health-check table.
+PASS, INFO, FAIL = "PASS", "INFO", "FAIL"
+
+
+def safe_console(text: str) -> str:
+    """Make arbitrary model/tool output safe for any Windows console codepage.
+
+    Model replies can contain emoji; printing them raw crashes cp1252 consoles
+    with UnicodeEncodeError. Replaces unencodable characters instead of raising.
+    """
+    encoding = (getattr(sys.stdout, "encoding", None) or "utf-8")
+    try:
+        text.encode(encoding)
+        return text
+    except UnicodeEncodeError:
+        return text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+
+
+def check_gpu_residency(model_name: str) -> tuple[bool, str, str]:
+    """Inspect actual model residency via `ollama ps` (local CLI, no network).
+
+    Returns (is_failure, status_label, detail):
+      - model loaded and GPU-resident          -> (True,  PASS, "100% GPU")
+      - known model, not currently loaded      -> (True,  INFO, "...not loaded...")
+      - model loaded but running on CPU        -> (False, FAIL, "loaded on CPU ...")
+      - ollama CLI missing / server degraded   -> (False, FAIL, reason)
+    `is_failure` only gates the overall PASS/FAIL of the health check; the
+    label is what gets printed.
+    """
+    try:
+        result = subprocess.run(
+            ["ollama", "ps"], capture_output=True, text=True, timeout=10
+        )
+    except FileNotFoundError:
+        return False, FAIL, "ollama CLI not found on PATH"
+    except subprocess.TimeoutExpired:
+        return False, FAIL, "ollama ps timed out"
+    except OSError as e:
+        return False, FAIL, f"ollama ps failed: {e}"
+
+    if result.returncode != 0:
+        err = (result.stderr or "unknown error").strip()
+        return False, FAIL, f"ollama ps error: {err}"
+
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    rows = lines[1:] if len(lines) > 1 else []
+
+    # Locate the model row (match on the base name, e.g. "hexa-brain")
+    model_base = model_name.split(":")[0].lower()
+    row = next((line for line in rows if model_base in line.lower()), None)
+
+    if row is None:
+        return True, INFO, (
+            f"{model_name} is available in Ollama but not loaded into memory "
+            f"(start a chat to load it)"
+        )
+
+    # Classify the processor column by substring. Data rows have multi-token
+    # values ("3.0 GB", "100% GPU"), so whitespace-split column indexes are
+    # unreliable. Candidate values: "100% GPU", "100% CPU", "78%/22% CPU/GPU".
+    # Model IDs are hex (digits a-f), so CPU/GPU substrings can only come from
+    # the processor column.
+    if re.search(r"CPU/GPU", row):
+        pct = re.search(r"(\d+%/\d+%)", row)
+        return True, PASS, (f"{pct.group(1)} CPU/GPU" if pct else "CPU/GPU")
+    if re.search(r"GPU", row):
+        pct = re.search(r"(\d+%)", row)
+        return True, PASS, (f"{pct.group(1)} GPU" if pct else "GPU")
+    if re.search(r"CPU", row):
+        pct = re.search(r"(\d+%)", row)
+        detail = f"loaded on CPU ({pct.group(1)})" if pct else "loaded on CPU"
+        return False, FAIL, detail
+    return False, FAIL, "residency unclear from ollama ps output"
+
+
+def check_whisper_load(critical_model: str, device: str, compute_type: str) -> tuple[str, str]:
+    """Load Whisper strictly from the local cache. Returns (label, detail)."""
+    try:
+        from faster_whisper import WhisperModel
+        WhisperModel(critical_model, device=device, compute_type=compute_type, local_files_only=True)
+        return PASS, f"{critical_model} (local cache)"
+    except Exception as e:
+        hint = (
+            f"download '{critical_model}' once while online: "
+            f".venv\\Scripts\\python.exe -c \"from faster_whisper import WhisperModel; "
+            f"WhisperModel('{critical_model}')\""
+        )
+        return FAIL, f"{e} | {hint}"
+
 
 def run_check() -> int:
-    """Run health checks and return exit code."""
+    """Run health checks and return exit code.
+
+    Each check yields (name, status_label, detail) where status_label is
+    PASS / FAIL / INFO. Exit code 1 only if any check is FAIL (INFO means
+    "works, but needs the model loaded first" and must not fail the report).
+    """
     print("=" * 60)
     print("HEXA HEALTH CHECK")
     print("=" * 60)
 
-    checks = []
+    checks: list[tuple[str, str, str]] = []
     config = get_config()
 
     # 1. Python version
-    import sys
     py_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     ok = sys.version_info >= (3, 12)
-    checks.append(("Python version", ok, f"{py_version} {'PASS' if ok else 'FAIL (need 3.12+)'}"))
+    checks.append(("Python version", PASS if ok else FAIL,
+                   py_version if ok else f"{py_version} (need 3.12+)"))
 
-    # 2. Ollama reachable
+    # 2. Ollama reachable (local service on 127.0.0.1, not an external call)
     try:
         import ollama
         client = ollama.Client(host=config.llm.host)
         client.list()
-        checks.append(("Ollama reachable", True, "PASS"))
+        checks.append(("Ollama reachable", PASS, "local API answered"))
     except Exception as e:
-        checks.append(("Ollama reachable", False, f"FAIL {e}"))
+        checks.append(("Ollama reachable", FAIL, str(e)))
 
     # 3. Model present
     try:
@@ -60,65 +156,58 @@ def run_check() -> int:
         # Handle :latest suffix
         model_base = config.llm.model.split(":")[0]
         ok = any(model_base in m for m in model_names)
-        checks.append(("Model present", ok, f"{config.llm.model} {'PASS' if ok else 'FAIL'}"))
-    except Exception as e:
-        checks.append(("Model present", False, f"FAIL {e}"))
+        checks.append(("Model present", PASS if ok else FAIL, f"{config.llm.model}"))
+    except Exception as e:  # includes NameError if the reachability check failed first
+        checks.append(("Model present", FAIL, str(e)))
 
-    # 4. GPU residency (requires model to be running)
-    try:
-        import subprocess
-        result = subprocess.run(["ollama", "ps"], capture_output=True, text=True, timeout=5)
-        gpu_ok = "100% GPU" in result.stdout and config.llm.model in result.stdout
-        checks.append(("GPU residency", gpu_ok, "100% GPU PASS" if gpu_ok else "FAIL (run model first)"))
-    except Exception as e:
-        checks.append(("GPU residency", False, f"FAIL {e}"))
+    # 4. GPU residency (three states: PASS / INFO-not-loaded / FAIL-on-CPU)
+    gpu_ok, gpu_label, gpu_detail = check_gpu_residency(config.llm.model)
+    checks.append(("GPU residency", gpu_label, gpu_detail))
 
     # 5. Microphone found
     try:
         import sounddevice as sd
         devices = sd.query_devices()
         has_input = any(d["max_input_channels"] > 0 for d in devices)
-        checks.append(("Microphone found", has_input, "PASS" if has_input else "FAIL"))
+        checks.append(("Microphone found", PASS if has_input else FAIL,
+                       "input device present" if has_input else "no input device"))
     except Exception as e:
-        checks.append(("Microphone found", False, f"FAIL {e}"))
+        checks.append(("Microphone found", FAIL, str(e)))
 
     # 6. Piper voice file present
     voice_path = Path(config.tts.voice_path)
     if not voice_path.is_absolute():
-        # Config is in hexa/config.yaml, so project root is parent of hexa/
+        # Project root: hexa/__main__.py -> hexa pkg -> hexa/ -> workspace root
         voice_path = Path(__file__).parent.parent.parent / config.tts.voice_path
-    voice_ok = voice_path.exists()
-    checks.append(("Piper voice file", voice_ok, f"{voice_path} {'PASS' if voice_ok else 'FAIL'}"))
+    checks.append(("Piper voice file", PASS if voice_path.exists() else FAIL, str(voice_path)))
 
-    # 7. Whisper model loads
-    try:
-        from faster_whisper import WhisperModel
-        model = WhisperModel(config.stt.model, device=config.stt.device, compute_type=config.stt.compute_type)
-        checks.append(("Whisper model loads", True, f"{config.stt.model} PASS"))
-    except Exception as e:
-        checks.append(("Whisper model loads", False, f"FAIL {e}"))
+    # 7. Whisper model loads (from local HF cache only; never the network)
+    label, detail = check_whisper_load(config.stt.model, config.stt.device, config.stt.compute_type)
+    checks.append(("Whisper model loads", label, detail))
 
-    # 8. Wake word model loads
+    # 8. Wake word model loads (local ONNX files)
     try:
         from openwakeword import Model
-        wakeword = Model(wakeword_models=[config.wake_word.model_name], inference_framework=config.wake_word.inference_framework)
-        checks.append(("Wake word model loads", True, f"{config.wake_word.model_name} PASS"))
+        Model(wakeword_models=[config.wake_word.model_name], inference_framework=config.wake_word.inference_framework)
+        checks.append(("Wake word model loads", PASS, f"{config.wake_word.model_name} (local ONNX)"))
     except Exception as e:
-        checks.append(("Wake word model loads", False, f"FAIL {e}"))
+        hint = (
+            f"download once while online: "
+            f".venv\\Scripts\\python.exe -c \"from openwakeword.utils import download_models; "
+            f"download_models(['{config.wake_word.model_name}_v0.1'])\""
+        )
+        checks.append(("Wake word model loads", FAIL, f"{e} | {hint}"))
 
     # Print results
-    all_pass = True
-    for name, ok, detail in checks:
-        status = "PASS" if ok else "FAIL"
-        if not ok:
-            all_pass = False
-        print(f"  [{status}] {name}: {detail}")
+    for name, label, detail in checks:
+        print(f"  [{label}] {name}: {detail}")
 
+    any_fail = any(label == FAIL for _, label, _ in checks)
     print("=" * 60)
-    print(f"OVERALL: {'ALL CHECKS PASSED' if all_pass else 'SOME CHECKS FAILED'}")
+    print(f"OVERALL: {'ALL CHECKS PASSED' if not any_fail else 'SOME CHECKS FAILED'}")
     print("=" * 60)
 
-    return 0 if all_pass else 1
+    return 0 if not any_fail else 1
 
 
 def run_text_mode() -> None:
@@ -126,7 +215,12 @@ def run_text_mode() -> None:
     print("Hexa Text Mode - Type 'exit' to quit")
     print("-" * 40)
 
-    router = get_router()
+    try:
+        router = get_router()
+    except Exception as e:
+        logger.exception("Failed to initialize router")
+        print(f"Failed to initialize: {e}")
+        return
 
     while True:
         try:
@@ -137,10 +231,15 @@ def run_text_mode() -> None:
                 continue
 
             start = time.perf_counter()
-            reply = router.route(user_input)
+            try:
+                reply = router.route(user_input)
+            except Exception as e:
+                # One failed request must never terminate the application.
+                logger.exception("Unhandled error while routing request")
+                reply = f"Error: {safe_console(str(e))}"
             latency = time.perf_counter() - start
 
-            print(f"Hexa: {reply}")
+            print(f"Hexa: {safe_console(reply)}")
             print(f"  (latency: {latency:.2f}s)")
 
         except KeyboardInterrupt:

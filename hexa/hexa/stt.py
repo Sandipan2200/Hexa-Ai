@@ -103,19 +103,27 @@ class WhisperTranscriber:
         self._load_model()
 
     def _load_model(self) -> None:
-        """Load faster-whisper model."""
+        """Load faster-whisper model from the local HF cache (fully offline)."""
         try:
             from faster_whisper import WhisperModel
             self._model = WhisperModel(
                 self.config.model,
                 device=self.config.device,
-                compute_type=self.config.compute_type
+                compute_type=self.config.compute_type,
+                local_files_only=True,  # never contact huggingface.co at runtime
             )
-            logger.info("Whisper model loaded: %s", self.config.model)
+            logger.info("Whisper model loaded locally: %s", self.config.model)
         except Exception as e:
-            logger.exception("Failed to load Whisper model")
+            hint = (
+                f"The cached Whisper model '{self.config.model}' was not found locally. "
+                f"Download it once while online, e.g.: "
+                f".venv\\Scripts\\python.exe -c \"from faster_whisper import WhisperModel; "
+                f"WhisperModel('{self.config.model}')\" "
+                f"(then Hexa runs fully offline)."
+            )
+            logger.error("Failed to load Whisper model: %s. %s", e, hint)
             emit_event(EventType.ERROR, source="stt", error=f"Model load failed: {e}")
-            raise
+            raise RuntimeError(f"Whisper model '{self.config.model}' unavailable: {e}. {hint}") from e
 
     def transcribe(self, audio_chunks: list[np.ndarray]) -> str:
         """

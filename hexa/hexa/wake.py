@@ -95,7 +95,13 @@ class WakeWordDetector:
 
     def _detection_loop(self) -> None:
         """Main detection loop."""
-        chunk_size = self._model.model_inputs[list(self._model.models.keys())[0]]
+        try:
+            chunk_size = self._model.model_inputs[list(self._model.models.keys())[0]]
+        except (IndexError, AttributeError):
+            # Model exposes no input specs (e.g. no wake models loaded):
+            # exit the thread cleanly instead of crashing it with a traceback.
+            logger.error("Wake word model exposes no input specs; detection disabled")
+            return
 
         while self._running:
             try:

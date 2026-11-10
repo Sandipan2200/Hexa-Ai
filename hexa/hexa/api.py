@@ -66,8 +66,14 @@ def create_app() -> FastAPI:
     @app.post("/command", response_model=CommandResponse, dependencies=[Depends(verify_token)])
     async def command(request: CommandRequest) -> CommandResponse:
         """Execute a text command through the router."""
-        router = get_router()
-        reply = router.route(request.text)
+        try:
+            reply = get_router().route(request.text)
+        except Exception as e:
+            # A failed chat/tool request must never take the service down.
+            # The router already converts LLM/tool failures to readable text;
+            # this is the final safety net for unexpected errors.
+            logger.exception("Unhandled error processing command")
+            reply = f"Error: {e}"
         return CommandResponse(reply=reply)
 
     @app.get("/state", response_model=StateResponse, dependencies=[Depends(verify_token)])

@@ -161,13 +161,26 @@ class TTSManager:
             except Exception as e:
                 logger.warning("pyttsx3 fallback unavailable: %s", e)
 
+    def _interrupt_without_lock(self) -> None:
+        """Interrupt current playback. Caller must hold self._lock.
+
+        Note: no INTERRUPT event is emitted here — this method only *reacts*
+        to interrupts. Emitting from here would re-trigger the voice
+        pipeline's INTERRUPT subscriber and recurse on the sync event bus.
+        """
+        if self._current_handle:
+            logger.debug("Interrupting TTS playback")
+            self._current_handle.interrupt()
+            self._current_handle = None
+
     def speak(self, text: str) -> PlaybackHandle:
         """
         Speak text and return handle for interruption.
         Uses primary engine, falls back on failure.
         """
         with self._lock:
-            self.interrupt()  # Stop any current playback
+            # Stop any current playback (internal helper: non-reentrant lock!)
+            self._interrupt_without_lock()
 
             # Try primary
             if self._piper:
@@ -196,11 +209,7 @@ class TTSManager:
     def interrupt(self) -> None:
         """Interrupt current playback immediately."""
         with self._lock:
-            if self._current_handle:
-                logger.debug("Interrupting TTS playback")
-                self._current_handle.interrupt()
-                self._current_handle = None
-                emit_event(EventType.INTERRUPT, reason="tts_interrupt")
+            self._interrupt_without_lock()
 
     def is_speaking(self) -> bool:
         """Check if currently speaking."""

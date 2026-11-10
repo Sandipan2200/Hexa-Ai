@@ -111,153 +111,110 @@ class TestPyttsx3TTS:
 
 
 class TestTTSManager:
-    """Tests for TTSManager."""
+    """Tests for TTSManager.
 
-    def test_manager_piper_primary(self, tts_config: TTSConfig) -> None:
-        """Test Piper as primary engine."""
+    Both engine classes are mocked at their constructor boundary: pyttsx3 COM
+    init and Piper ONNX load cannot run inside unit tests. Everything else
+    (TTSManager fallback/dispatch/interrupt logic) is real code.
+    """
+
+    @pytest.fixture
+    def manager(self, tts_config: TTSConfig):
+        """TTSManager with both engines as MagicMocks (no real synth engines)."""
         with patch("hexa.tts.PiperTTS") as mock_piper_class, \
              patch("hexa.tts.Pyttsx3TTS") as mock_fallback_class:
+            mock_piper_class.return_value = MagicMock()
+            mock_fallback_class.return_value = MagicMock()
+            yield TTSManager(tts_config)
 
-            mock_piper = MagicMock()
-            mock_piper.synthesize.return_value = b"\x00\x00" * 1000
-            mock_piper_class.return_value = mock_piper
+    def test_manager_piper_primary(self, manager: TTSManager) -> None:
+        """Test Piper chosen as primary engine."""
+        assert manager._piper is not None
+        assert manager._fallback is not None
 
-            manager = TTSManager(tts_config)
+    def test_manager_fallback_on_piper_failure(self, manager: TTSManager) -> None:
+        """Test fallback used when Piper synthesis fails."""
+        manager._piper.synthesize.side_effect = Exception("Piper failed")
+        manager._fallback.synthesize.return_value = b"\x00\x00" * 1000
 
-            # Should have piper as primary
-            assert manager._piper is mock_piper
+        with patch("hexa.tts.play_audio_bytes_async") as mock_play:
+            mock_handle = MagicMock()
+            mock_play.return_value = mock_handle
+            handle = manager.speak("Hello")
 
-    @pytest.mark.skip(reason="Timeout issue - needs investigation")
-    def test_manager_fallback_on_piper_failure(self, tts_config: TTSConfig) -> None:
-        """Test fallback when Piper fails."""
-        with patch("hexa.tts.PiperTTS") as mock_piper_class, \
-             patch("hexa.tts.Pyttsx3TTS") as mock_fallback_class:
+        manager._piper.synthesize.assert_called_once_with("Hello")
+        manager._fallback.synthesize.assert_called_once_with("Hello")
+        assert handle is mock_handle
 
-            mock_piper = MagicMock()
-            mock_piper.synthesize.side_effect = Exception("Piper failed")
-            mock_piper_class.return_value = mock_piper
+    def test_manager_both_fail(self, manager: TTSManager) -> None:
+        """Test readable RuntimeError when both engines fail."""
+        manager._piper.synthesize.side_effect = Exception("Piper failed")
+        manager._fallback.synthesize.side_effect = Exception("Fallback failed")
+        with pytest.raises(RuntimeError, match="No TTS engine available"):
+            manager.speak("Hello")
 
-            mock_fallback = MagicMock()
-            mock_fallback.synthesize.return_value = b"\x00\x00" * 1000
-            mock_fallback_class.return_value = mock_fallback
+    def test_manager_interrupt(self, manager: TTSManager) -> None:
+        """Test interrupting current playback stops it immediately."""
+        manager._piper.synthesize.return_value = b"\x00\x00" * 1000
 
-            manager = TTSManager(tts_config)
+        with patch("hexa.tts.play_audio_bytes_async") as mock_play:
+            mock_handle = MagicMock()
+            mock_play.return_value = mock_handle
+            manager.speak("Hello")
+            assert manager._current_handle is mock_handle
 
-            with patch("hexa.tts.play_audio_bytes_async") as mock_play:
-                mock_handle = MagicMock()
-                mock_play.return_value = mock_handle
+            manager.interrupt()
+            mock_handle.interrupt.assert_called_once()
+            assert manager._current_handle is None
 
-                handle = manager.speak("Hello")
+    def test_interrupt_clears_no_handle_safely(self, manager: TTSManager) -> None:
+        """Interrupting with nothing playing must be a no-op, not a crash."""
+        manager.interrupt()  # no handle yet
+        assert manager._current_handle is None
 
-                # Should have tried piper, then fallback
-                mock_piper.synthesize.assert_called_once_with("Hello")
-                mock_fallback.synthesize.assert_called_once_with("Hello")
-                assert handle is mock_handle
+    def test_manager_is_speaking(self, manager: TTSManager) -> None:
+        manager._piper.synthesize.return_value = b"\x00\x00" * 1000
+        assert not manager.is_speaking()
 
-    @pytest.mark.skip(reason="Timeout issue - needs investigation")
-    def test_manager_both_fail(self, tts_config: TTSConfig) -> None:
-        """Test error when both engines fail."""
-        with patch("hexa.tts.PiperTTS") as mock_piper_class, \
-             patch("hexa.tts.Pyttsx3TTS") as mock_fallback_class:
+        with patch("hexa.tts.play_audio_bytes_async") as mock_play:
+            mock_handle = MagicMock()
+            mock_handle.is_playing = True
+            mock_play.return_value = mock_handle
+            manager.speak("Hello")
+            assert manager.is_speaking()
 
-            mock_piper = MagicMock()
-            mock_piper.synthesize.side_effect = Exception("Piper failed")
-            mock_piper_class.return_value = mock_piper
-
-            mock_fallback = MagicMock()
-            mock_fallback.synthesize.side_effect = Exception("Fallback failed")
-            mock_fallback_class.return_value = mock_fallback
-
-            manager = TTSManager(tts_config)
-
-            with pytest.raises(RuntimeError, match="No TTS engine available"):
-                manager.speak("Hello")
-
-    @pytest.mark.skip(reason="Timeout issue - needs investigation")
-    def test_manager_interrupt(self, tts_config: TTSConfig) -> None:
-        """Test interrupting current playback."""
-        with patch("hexa.tts.PiperTTS") as mock_piper_class:
-
-            mock_piper = MagicMock()
-            mock_piper.synthesize.return_value = b"\x00\x00" * 1000
-            mock_piper_class.return_value = mock_piper
-
-            manager = TTSManager(tts_config)
-
-            with patch("hexa.tts.play_audio_bytes_async") as mock_play:
-                mock_handle = MagicMock()
-                mock_play.return_value = mock_handle
-
-                handle = manager.speak("Hello")
-                assert manager._current_handle is mock_handle
-
-                manager.interrupt()
-
-                mock_handle.interrupt.assert_called_once()
-                assert manager._current_handle is None
-
-    @pytest.mark.skip(reason="Timeout issue - needs investigation")
-    def test_manager_is_speaking(self, tts_config: TTSConfig) -> None:
-        """Test is_speaking property."""
-        with patch("hexa.tts.PiperTTS") as mock_piper_class:
-
-            mock_piper = MagicMock()
-            mock_piper.synthesize.return_value = b"\x00\x00" * 1000
-            mock_piper_class.return_value = mock_piper
-
-            manager = TTSManager(tts_config)
-
+            mock_handle.is_playing = False
             assert not manager.is_speaking()
 
-            with patch("hexa.tts.play_audio_bytes_async") as mock_play:
-                mock_handle = MagicMock()
-                mock_handle.is_playing = True
-                mock_play.return_value = mock_handle
+    def test_manager_wait(self, manager: TTSManager) -> None:
+        manager._piper.synthesize.return_value = b"\x00\x00" * 1000
+        with patch("hexa.tts.play_audio_bytes_async") as mock_play:
+            mock_handle = MagicMock()
+            mock_play.return_value = mock_handle
+            manager.speak("Hello")
+            manager.wait()
+            mock_handle.wait.assert_called_once()
 
-                manager.speak("Hello")
-                assert manager.is_speaking()
+    def test_manager_wait_no_playback(self, manager: TTSManager) -> None:
+        """Waiting with nothing playing must not block or raise."""
+        manager.wait()  # no handle
+        assert manager._current_handle is None
 
-                mock_handle.is_playing = False
-                assert not manager.is_speaking()
+    def test_manager_concurrent_speak(self, manager: TTSManager) -> None:
+        """A new speak() call must interrupt the previous playback.
 
-    @pytest.mark.skip(reason="Timeout issue - needs investigation")
-    def test_manager_wait(self, tts_config: TTSConfig) -> None:
-        """Test waiting for playback."""
-        with patch("hexa.tts.PiperTTS") as mock_piper_class:
+        Regression: speak() used to call self.interrupt() while already
+        holding the non-reentrant lock -> deadlock on the second turn.
+        """
+        manager._piper.synthesize.return_value = b"\x00\x00" * 1000
 
-            mock_piper = MagicMock()
-            mock_piper.synthesize.return_value = b"\x00\x00" * 1000
-            mock_piper_class.return_value = mock_piper
+        with patch("hexa.tts.play_audio_bytes_async") as mock_play:
+            mock_handle1 = MagicMock()
+            mock_handle2 = MagicMock()
+            mock_play.side_effect = [mock_handle1, mock_handle2]
 
-            manager = TTSManager(tts_config)
+            manager.speak("First")
+            manager.speak("Second")  # must not deadlock
 
-            with patch("hexa.tts.play_audio_bytes_async") as mock_play:
-                mock_handle = MagicMock()
-                mock_play.return_value = mock_handle
-
-                handle = manager.speak("Hello")
-                manager.wait()
-
-                mock_handle.wait.assert_called_once()
-
-    @pytest.mark.skip(reason="Timeout issue - needs investigation")
-    def test_manager_concurrent_speak(self, tts_config: TTSConfig) -> None:
-        """Test that new speak interrupts previous."""
-        with patch("hexa.tts.PiperTTS") as mock_piper_class:
-
-            mock_piper = MagicMock()
-            mock_piper.synthesize.return_value = b"\x00\x00" * 1000
-            mock_piper_class.return_value = mock_piper
-
-            manager = TTSManager(tts_config)
-
-            with patch("hexa.tts.play_audio_bytes_async") as mock_play:
-                mock_handle1 = MagicMock()
-                mock_handle2 = MagicMock()
-                mock_play.side_effect = [mock_handle1, mock_handle2]
-
-                manager.speak("First")
-                manager.speak("Second")
-
-                mock_handle1.interrupt.assert_called_once()
-                assert manager._current_handle is mock_handle2
+            mock_handle1.interrupt.assert_called_once()
+            assert manager._current_handle is mock_handle2

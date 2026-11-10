@@ -8,7 +8,13 @@ from typing import Any
 
 from hexa.config import get_config
 from hexa.events import emit_event, EventType
-from hexa.llm import get_llm
+from hexa.llm import (
+    get_llm,
+    extract_message,
+    LLMConnectionError,
+    LLMError,
+    LLMResponseError,
+)
 from hexa.memory import get_memory
 from hexa.tools import get_registry
 
@@ -118,31 +124,39 @@ class Router:
         return None
 
     def _llm_path(self, text: str) -> str:
-        """Route through LLM with tool calling."""
+        """Route through LLM with native tool calling."""
         start = time.perf_counter()
         tool_schemas = self.registry.get_schemas()
 
-        # First LLM call
-        response = self.llm.chat(text, tool_schemas)
+        try:
+            response = self.llm.chat(text, tool_schemas)
+        except LLMConnectionError as e:
+            return self._fail(text, f"LLM unavailable: {e}", start)
+        except LLMResponseError as e:
+            return self._fail(text, f"LLM error (status {e.status_code}): {e}", start)
+        except LLMError as e:
+            return self._fail(text, f"LLM error: {e}", start)
 
-        # Add user message to history
         self.llm.add_to_history("user", text)
 
         # Handle tool calls (max 3 rounds)
         for round_num in range(3):
-            message = response.get("message", {})
+            message = extract_message(response)
             tool_calls = message.get("tool_calls", [])
 
             if not tool_calls:
-                # No tool calls, final response
-                reply = message.get("content", "").strip()
+                # No tool calls, final natural-language response
+                reply = str(message.get("content", "")).strip()
+                if not reply:
+                    # Malformed/empty output -> fail safely with a useful message
+                    reply = "I couldn't process that from the model. Please rephrase."
                 self.llm.add_to_history("assistant", reply)
                 latency = time.perf_counter() - start
                 emit_event(EventType.REPLY, text=reply, source="llm", latency=latency)
                 return reply
 
             # Execute tool calls
-            self.llm.add_to_history("assistant", "", tool_calls)
+            self.llm.add_to_history("assistant", str(message.get("content", "")), tool_calls)
 
             for tc in tool_calls:
                 func = tc.get("function", {})
@@ -152,33 +166,51 @@ class Router:
                 logger.info("LLM tool call: %s(%s)", name, args)
                 emit_event(EventType.TOOL_CALL, tool=name, args=args)
 
-                try:
-                    # Check permission
-                    tool = self.registry.get_tool(name)
-                    if tool and tool.permission == "confirm":
-                        # In a real implementation, ask user for confirmation
-                        # For now, auto-confirm with a note
-                        logger.info("Tool %s requires confirmation (auto-confirmed)", name)
-                        emit_event(EventType.TOOL_CALL, tool=name, args=args, confirm=True)
+                # Validate tool name against the registry
+                tool = self.registry.get_tool(name) if isinstance(name, str) else None
 
-                    if tool and tool.permission == "blocked":
-                        result = f"Tool {name} is blocked."
-                    else:
-                        result = self.registry.call(name, **args)
+                if tool is None:
+                    result = f"Error: unknown tool '{name}'. Available: " + ", ".join(
+                        t.name for t in self.registry.get_all_tools() if t.permission != "blocked"
+                    )
+                    emit_event(EventType.ERROR, source="tool", tool=name, error=result)
+                elif not isinstance(args, dict):
+                    result = f"Error: invalid arguments for {name} (expected object)."
+                    emit_event(EventType.ERROR, source="tool", tool=name, error=result)
+                else:
+                    try:
+                        if tool.permission == "confirm":
+                            # In a real implementation, ask user for confirmation
+                            # For now, auto-confirm with a note
+                            logger.info("Tool %s requires confirmation (auto-confirmed)", name)
+                            emit_event(EventType.TOOL_CALL, tool=name, args=args, confirm=True)
 
-                    logger.info("Tool result: %s", str(result)[:100])
-                    emit_event(EventType.TOOL_RESULT, tool=name, result=str(result))
+                        if tool.permission == "blocked":
+                            result = f"Tool {name} is blocked."
+                        else:
+                            result = self.registry.call(name, **args)
 
-                except Exception as e:
-                    logger.exception("Tool call failed: %s", name)
-                    result = f"Error: {e}"
-                    emit_event(EventType.ERROR, source="tool", tool=name, error=str(e))
+                        logger.info("Tool result: %s", str(result)[:100])
+                        emit_event(EventType.TOOL_RESULT, tool=name, result=str(result))
 
-                # Add tool result to history
-                self.llm.add_to_history("tool", str(result), tool_call_id=tc.get("id", ""))
+                    except TypeError as e:
+                        # Wrong/missing arguments for the registered signature
+                        logger.warning("Tool %s got invalid arguments: %s", name, e)
+                        result = f"Error: invalid arguments for {name}: {e}"
+                        emit_event(EventType.ERROR, source="tool", tool=name, error=result)
+                    except Exception as e:
+                        logger.exception("Tool call failed: %s", name)
+                        result = f"Error: {e}"
+                        emit_event(EventType.ERROR, source="tool", tool=name, error=str(e))
 
-            # Next LLM call with tool results
-            response = self.llm.chat("", tool_schemas)
+                # Tool result goes back to the LLM as a 'tool' role message
+                self.llm.add_to_history("tool", str(result))
+
+            # Next LLM call with tool results (must also survive LLM errors)
+            try:
+                response = self.llm.chat("", tool_schemas)
+            except LLMError as e:
+                return self._fail(text, f"LLM error after tool call: {e}", start)
 
         # Max rounds reached
         reply = "Max tool rounds reached."
@@ -186,6 +218,17 @@ class Router:
         latency = time.perf_counter() - start
         emit_event(EventType.REPLY, text=reply, source="llm", latency=latency)
         return reply
+
+    def _fail(self, text: str, message: str, start: float) -> str:
+        """Return a readable error for an LLM failure instead of crashing.
+
+        History is deliberately not modified here: the user turn is already
+        recorded when this is reached mid-loop, and an error return should not
+        pollute future conversation context.
+        """
+        logger.error("LLM path failed: %s", message)
+        emit_event(EventType.REPLY, text=message, source="llm_error", latency=time.perf_counter() - start)
+        return message
 
 
 # Global router instance

@@ -1,6 +1,22 @@
 """Hexa - Offline Voice Assistant Core."""
 from __future__ import annotations
 
+import os
+
+# ---------------------------------------------------------------------------
+# STRICT OFFLINE GUARANTEE (set BEFORE any Hugging Face-using library imports).
+#
+# faster-whisper / transformers / huggingface_hub normally ping
+# huggingface.co on model load (e.g. ".../faster-whisper-small.en/revision/main").
+# These variables force fully-local cache loading so Hexa never touches the
+# network at runtime. All models (Whisper, Silero VAD, openWakeWord, Piper)
+# are read from local files. See README.md "Offline operation".
+# ---------------------------------------------------------------------------
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+
 __version__ = "0.1.0"
 
 # Import tools to register them
