@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from hexa.memory import get_memory
 from hexa.router import get_router
 from hexa.state import get_state_machine
 from hexa.tools import get_registry
+from hexa.voice import get_voice_pipeline, shutdown_voice_pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -148,13 +150,35 @@ def run_text_mode() -> None:
             break
 
 
-async def run_service() -> None:
-    """Run the full service (API + voice)."""
+async def run_service(voice: bool = False) -> None:
+    """Run the full service (API + optional voice)."""
     from hexa.api import create_app
     import uvicorn
 
     config = get_config()
     app = create_app()
+
+    # Start voice pipeline if requested
+    voice_pipeline = None
+    if voice:
+        logger.info("Starting voice pipeline...")
+        voice_pipeline = get_voice_pipeline()
+        voice_pipeline.start()
+
+    # Setup signal handlers for graceful shutdown
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+
+    def signal_handler() -> None:
+        logger.info("Shutdown signal received")
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            # Windows doesn't support add_signal_handler for SIGTERM
+            pass
 
     # Start the server
     server_config = uvicorn.Config(
@@ -164,13 +188,28 @@ async def run_service() -> None:
         log_level="info",
     )
     server = uvicorn.Server(server_config)
-    await server.serve()
+
+    # Run server and wait for shutdown
+    server_task = asyncio.create_task(server.serve())
+    shutdown_task = asyncio.create_task(shutdown_event.wait())
+
+    try:
+        await asyncio.wait([server_task, shutdown_task], return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        if voice_pipeline:
+            logger.info("Stopping voice pipeline...")
+            shutdown_voice_pipeline()
+        if not server_task.done():
+            server.should_exit = True
+            await server_task
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Hexa Voice Assistant")
     parser.add_argument("--check", action="store_true", help="Run health checks")
     parser.add_argument("--text", action="store_true", help="Run in text mode")
+    parser.add_argument("--voice", action="store_true", help="Run voice service (implies --service)")
+    parser.add_argument("--service", action="store_true", help="Run API service only (no voice)")
     parser.add_argument("--config", type=Path, help="Config file path")
 
     args = parser.parse_args()
@@ -185,9 +224,10 @@ def main() -> int:
         run_text_mode()
         return 0
 
-    # Default: run full service
+    # Default: run full service with voice
+    voice_enabled = args.voice or (not args.service and not args.text and not args.check)
     try:
-        asyncio.run(run_service())
+        asyncio.run(run_service(voice=voice_enabled))
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     return 0

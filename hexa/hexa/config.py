@@ -47,6 +47,17 @@ class TTSConfig(BaseModel):
     fallback: str = "pyttsx3"
 
 
+class VADConfig(BaseModel):
+    enabled: bool = True
+    silence_timeout: float = 1.5
+    min_speech_duration: float = 0.5
+
+
+class ConversationConfig(BaseModel):
+    enabled: bool = True
+    timeout: float = 10.0
+
+
 class LLMConfig(BaseModel):
     model: str = "hexa-brain"
     host: str = "http://localhost:11434"
@@ -77,7 +88,9 @@ class Config(BaseSettings):
     wake_word: WakeWordConfig = Field(default_factory=WakeWordConfig)
     hotkey: HotkeyConfig = Field(default_factory=HotkeyConfig)
     stt: STTConfig = Field(default_factory=STTConfig)
+    vad: VADConfig = Field(default_factory=VADConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
+    conversation: ConversationConfig = Field(default_factory=ConversationConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     api: APIConfig = Field(default_factory=APIConfig)
