@@ -143,4 +143,4 @@ Edit `hexa/config.yaml` to customize:
 .venv\Scripts\python.exe -m pytest hexa/tests/ -v
 ```
 
-51 tests covering: config, router fast-path (20+ phrases), tools, registry schemas, permissions, memory, event bus, state machine, API auth.
+95 tests passing (7 skipped): config, router fast-path (20+ phrases), tools, registry schemas, permissions, memory, event bus, state machine, API auth, audio stream, wake word, hotkey, STT, VAD, TTS, voice pipeline.
