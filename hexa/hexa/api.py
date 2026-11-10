@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
+import hexa
 from hexa.config import get_config
 from hexa.events import Event, EventType, get_event_bus
 from hexa.router import get_router
@@ -18,6 +21,9 @@ from hexa.tools import get_registry
 logger = logging.getLogger(__name__)
 
 security = HTTPBearer(auto_error=False)
+
+# Set in create_app; used by the /health uptime readout.
+_app_started_at: float | None = None
 
 
 class CommandRequest(BaseModel):
@@ -51,6 +57,49 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) 
     return credentials.credentials
 
 
+_INDEX_HTML = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hexa - Offline Voice Assistant</title>
+  <style>
+    body {{
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #111418; color: #d7dce2; margin: 0;
+      display: grid; place-items: center; min-height: 100vh;
+    }}
+    .card {{
+      max-width: 560px; padding: 2.5rem; border-radius: 12px;
+      background: #1a1f26; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+    }}
+    h1 {{ color: #7cb2ff; margin: 0 0 0.25rem; font-size: 1.6rem; }}
+    .sub {{ color: #8b94a1; margin-bottom: 1.25rem; }}
+    ul {{ line-height: 1.8; padding-left: 1.1rem; }}
+    a {{ color: #7cb2ff; }}
+    code {{
+      background: #232a33; padding: 0.1rem 0.35rem; border-radius: 4px;
+      font-size: 0.92em;
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Hexa is running</h1>
+    <p class="sub">100% offline voice assistant core &middot; v{hexa.__version__}</p>
+    <ul>
+      <li><a href="/health" rel="noopener"><code>/health</code></a> - liveness status (JSON)</li>
+      <li><a href="/docs" rel="noopener"><code>/docs</code></a> - interactive API docs</li>
+      <li><code>/command</code>, <code>/state</code>, <code>/tools</code>, <code>/config</code> - require the bearer token from <code>config.yaml</code></li>
+    </ul>
+    <p class="sub">REST and WebSocket endpoints authenticate with the bearer token
+    (<code>Authorization: Bearer &lt;token&gt;</code> / <code>?token=</code> for events).</p>
+  </div>
+</body>
+</html>
+"""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
@@ -61,7 +110,30 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
-    app = FastAPI(title="Hexa API", version="0.1.0", lifespan=lifespan)
+    global _app_started_at
+    _app_started_at = time.time()
+    app = FastAPI(title="Hexa API", version=hexa.__version__, lifespan=lifespan)
+
+    # ------------------------------------------------------------------
+    # Unauthenticated info/liveness endpoints.
+    # Browsers and uptime probes hitting the service root previously got a
+    # bare 404 that looked like a fault. These endpoints expose nothing
+    # sensitive (no state, no config, no token) - all real endpoints below
+    # still require the bearer token. Interactive docs remain at /docs.
+    # ------------------------------------------------------------------
+    @app.get("/", include_in_schema=False)
+    async def index() -> HTMLResponse:
+        return HTMLResponse(_INDEX_HTML)
+
+    @app.get("/health", include_in_schema=False)
+    async def health() -> dict[str, Any]:
+        uptime = time.time() - _app_started_at if _app_started_at else 0.0
+        return {
+            "status": "ok",
+            "service": "hexa",
+            "version": hexa.__version__,
+            "uptime_seconds": round(uptime, 1),
+        }
 
     @app.post("/command", response_model=CommandResponse, dependencies=[Depends(verify_token)])
     async def command(request: CommandRequest) -> CommandResponse:

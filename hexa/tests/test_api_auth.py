@@ -108,6 +108,27 @@ def test_stop_endpoint(client: TestClient) -> None:
     assert response.json()["status"] == "stopped"
 
 
+def test_root_returns_welcome_page_without_token(client: TestClient) -> None:
+    """/ serves an HTML welcome page without auth (browsers hitting the
+    service root previously got a bare 404). Contains no secrets."""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Hexa is running" in response.text
+    assert "test-token-123" not in response.text
+
+
+def test_health_endpoint_liveness_without_token(client: TestClient) -> None:
+    """/health is a liveness probe: 200 without token, no sensitive data."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["service"] == "hexa"
+    assert isinstance(payload["uptime_seconds"], float)
+    assert "token" not in response.text
+
+
 def test_websocket_requires_token(client: TestClient) -> None:
     """Test WebSocket requires valid token."""
     # Connect without token - should fail

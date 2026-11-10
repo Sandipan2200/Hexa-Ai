@@ -11,7 +11,7 @@
 - Tool registry with auto JSON schema generation from signatures
 - Fast-path router (10 regex patterns, 20+ test phrases)
 - Tools: open_app, open_tabs, search, get_time, system_status, remember, recall, set_timer
-- API: FastAPI REST + WebSocket, bearer token auth (all endpoints tested)
+- API: FastAPI REST + WebSocket, bearer token auth (all endpoints tested); unauthenticated `/` welcome page and `/health` liveness endpoint (no secrets served there), plus interactive `/docs`
 - Health check (`--check`) - all 8 checks pass, incl. real GPU-residency readout
 - Text mode (`--text`) - interactive CLI working
 - **Voice pipeline (Phase 7):** Audio stream, wake word (openWakeWord), hotkey (pynput), STT (faster-whisper), VAD (Silero), TTS (Piper + pyttsx3 fallback), voice pipeline orchestration
@@ -19,7 +19,7 @@
 - **100% offline runtime (fixed this session):** offline env vars set before HF imports, Whisper `local_files_only=True`; verified via dead-proxy simulation with zero non-localhost log lines
 - **GPU residency check (fixed this session):** three-state PASS/INFO/FAIL from `ollama ps`; `keep_alive=-1` proven via `ollama ps` → `UNTIL: Forever` after real Hexa requests
 - **Crash-proof chat handling (fixed this session):** any single failed LLM/tool request returns a readable spoken reply instead of crashing; no skipped tests remain
-- 154 unit tests pass, 0 skipped
+- 156 unit tests pass, 0 skipped
 
 **What doesn't work (✗):**
 - Batch file launcher has path quoting issues (pre-existing, unchanged)
@@ -89,7 +89,7 @@ hexa/
 │       └── timers.py        (30)
 └── tests/
     ├── conftest.py          (6)
-    ├── test_api_auth.py     (95)
+    ├── test_api_auth.py     (125)  incl. / + /health no-token tests
     ├── test_audio.py        (125)
     ├── test_config.py       (53)
     ├── test_events_state.py (121)
@@ -148,6 +148,10 @@ ollama run hexa-brain "hello"  # keep alive
 # Get bearer token from hexa.log on first run
 TOKEN="your-token-from-log"
 
+# Liveness/info (no token needed)
+curl http://127.0.0.1:8000/
+curl http://127.0.0.1:8000/health
+
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/state
 curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"text": "what time is it"}' http://127.0.0.1:8000/command
@@ -167,9 +171,10 @@ Condensed per-module results (final run, TTY -v output):
 ```
 ============================= test session starts =============================
 platform win32 -- Python 3.12.10, pytest-9.2.0
-collected 154 items
+collected 156 items
 
-test_api_auth.py            9 passed   auth, endpoints, websocket
+test_api_auth.py           11 passed   auth, endpoints, websocket, welcome
+                                       page + /health liveness (no token)
 test_audio.py               8 passed   stream, consumers, playback handles
 test_config.py              4 passed
 test_events_state.py       12 passed   event bus + state machine
@@ -201,7 +206,7 @@ test_voice.py              11 passed   conversation-mode test rebuilt
 test_wake.py                9 passed   wake guard added: empty-model thread
                                        exits cleanly
 
-====================== 154 passed, 7 warnings in 11.13s ======================
+====================== 156 passed, 7 warnings in 7.83s =======================
 ```
 
 The only warnings are third-party `torch.jit.load` deprecation notices from

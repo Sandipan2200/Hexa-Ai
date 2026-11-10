@@ -123,6 +123,13 @@ run_hexa.bat
 The API runs on `http://127.0.0.1:8000` with bearer token auth (token in `hexa.log` on first run).
 
 ```bash
+# Root and health - no token needed (liveness/info only, no secrets)
+# Open http://127.0.0.1:8000/          -> welcome page
+curl http://127.0.0.1:8000/health     # {"status": "ok", "service": "hexa", ...}
+
+# Interactive docs
+# Open http://127.0.0.1:8000/docs
+
 # Get state
 curl -H "Authorization: Bearer YOUR_TOKEN" http://127.0.0.1:8000/state
 
@@ -184,7 +191,7 @@ hexa/
 │       ├── system.py    # get_time, system_status
 │       ├── notes.py     # remember, recall
 │       └── timers.py    # set_timer, dummy tools
-└── tests/               # 154 unit tests
+└── tests/               # 156 unit tests
 ```
 
 ## Configuration
@@ -206,7 +213,7 @@ top-level fields only; nested fields like `llm.host` must be edited in YAML).
 .venv\Scripts\python.exe -m pytest hexa/tests/ -v
 ```
 
-154 tests passing, 0 skipped: config, router fast-path (20+ phrases), full
+156 tests passing, 0 skipped: config, router fast-path (20+ phrases), full
 native tool-calling cycle (execution, result feedback, final reply, invalid
 tool name/args, blocked tools, round cap, LLM 400/unreachable fallbacks),
 LLM client (envelope wrapping, keep_alive kwarg, typed errors, history),
