@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import logging
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -249,12 +251,59 @@ def run_text_mode() -> None:
             break
 
 
-async def run_service(voice: bool = False) -> None:
-    """Run the full service (API + optional voice)."""
+def _port_holder_description(host: str, port: int) -> str:
+    """Best-effort identification of what occupies a port.
+
+    Probes GET /health with a short timeout; recognizes Hexa instances by
+    their liveness payload. Never raises.
+    """
+    import httpx
+    try:
+        response = httpx.get(f"http://{host}:{port}/health", timeout=2.0)
+        data = response.json()
+        if data.get("service") == "hexa":
+            uptime = data.get("uptime_seconds")
+            uptime_part = f", uptime {int(uptime)} s" if isinstance(uptime, (int, float)) else ""
+            return f"a running Hexa instance is listening there{uptime_part}"
+        return "another application"
+    except Exception:
+        return "another application (no health endpoint)"
+
+
+def port_status(host: str, port: int) -> tuple[bool, str | None]:
+    """Check whether host:port is bindable before starting anything heavy.
+
+    Returns (free, holder_description). holder_description only identifies a
+    likely culprit when the port is busy; match uvicorn's plain-bind behavior
+    (no SO_REUSEADDR, so TIME_WAIT leftovers also report busy).
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError as e:
+            in_use = e.errno in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", 10048), 10013)
+            if in_use:
+                return False, _port_holder_description(host, port)
+            return False, f"bind failed: {e}"
+    return True, None
+
+
+async def run_service(voice: bool = False) -> int:
+    """Run the full service (API + optional voice). Returns an exit code."""
     from hexa.api import create_app
     import uvicorn
 
     config = get_config()
+
+    # Fail fast on a busy port BEFORE loading the voice models (loading
+    # Whisper + wake word takes ~10 s just to unwind with a traceback).
+    free, holder = port_status(config.api.host, config.api.port)
+    if not free:
+        detail = f" ({holder})" if holder else ""
+        print(f"Cannot start Hexa: port {config.api.port} is already in use{detail}.")
+        print("  Stop the other instance, or set a different `port` under `api:` in hexa/config.yaml.")
+        return 1
+
     app = create_app()
 
     # Start voice pipeline if requested
@@ -301,6 +350,23 @@ async def run_service(voice: bool = False) -> None:
         if not server_task.done():
             server.should_exit = True
             await server_task
+        else:
+            # Server exited before the shutdown signal (rare race after the
+            # pre-check, e.g. someone grabbed the port meanwhile). Retrieve
+            # the task's exception so asyncio doesn't log 'Task exception
+            # was never retrieved'; report in one readable line.
+            exc = None if server_task.cancelled() else server_task.exception()
+            if exc is not None:
+                if isinstance(exc, (SystemExit, OSError)):
+                    logger.error(
+                        "Hexa API could not bind %s:%s - port taken during startup? "
+                        "Stop the other instance or change api.port in config.yaml.",
+                        config.api.host, config.api.port,
+                    )
+                else:
+                    logger.error("Server task failed: %s", exc)
+
+    return 0
 
 
 def main() -> int:
@@ -325,11 +391,13 @@ def main() -> int:
 
     # Default: run full service with voice
     voice_enabled = args.voice or (not args.service and not args.text and not args.check)
+    exit_code = 0
     try:
-        asyncio.run(run_service(voice=voice_enabled))
+        exit_code = asyncio.run(run_service(voice=voice_enabled))
     except KeyboardInterrupt:
         logger.info("Shutting down...")
-    return 0
+        exit_code = 0
+    return exit_code
 
 
 if __name__ == "__main__":

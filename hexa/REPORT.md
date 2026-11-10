@@ -19,7 +19,7 @@
 - **100% offline runtime (fixed this session):** offline env vars set before HF imports, Whisper `local_files_only=True`; verified via dead-proxy simulation with zero non-localhost log lines
 - **GPU residency check (fixed this session):** three-state PASS/INFO/FAIL from `ollama ps`; `keep_alive=-1` proven via `ollama ps` → `UNTIL: Forever` after real Hexa requests
 - **Crash-proof chat handling (fixed this session):** any single failed LLM/tool request returns a readable spoken reply instead of crashing; no skipped tests remain
-- 156 unit tests pass, 0 skipped
+- 161 unit tests pass, 0 skipped
 
 **What doesn't work (✗):**
 - Batch file launcher has path quoting issues (pre-existing, unchanged)
@@ -67,7 +67,7 @@ hexa/
 ├── .gitignore               (10 lines)
 ├── hexa/
 │   ├── __init__.py          (62)   offline env vars set before HF imports
-│   ├── __main__.py          (278)  CLI, --check GPU 3-state helper, safe_console
+│   ├── __main__.py          (337)  CLI, --check GPU 3-state helper, safe_console, launch port-guard
 │   ├── api.py               (107)  FastAPI REST + WebSocket, /command guard
 │   ├── config.py            (106)
 │   ├── events.py            (81)
@@ -96,6 +96,7 @@ hexa/
     ├── test_llm.py          (152)  [NEW]
     ├── test_memory.py       (59)
     ├── test_offline.py      (134)  [NEW] incl. GPU residency 3 states
+    ├── test_port_guard.py   (60)   [NEW] launch port-guard
     ├── test_router_fastpath.py (188)
     ├── test_router_llm.py   (234)  [NEW]
     ├── test_stt.py          (214)
@@ -137,7 +138,14 @@ ollama run hexa-brain "hello"  # keep alive
 .venv\Scripts\python.exe -m hexa --text
 
 # Full service (API + voice - not fully tested)
-.venv\Scripts\python.exe -m hexa
+.venv\Scripts\python.exe -m hexa --voice
+
+# Port conflict: launching a second instance fails fast with a readable
+# message and exit code 1 (no model loading, no traceback):
+#   Cannot start Hexa: port 8000 is already in use
+#   (a running Hexa instance is listening there, uptime 24 s).
+# Stop the other instance, or set a different `port` under `api:` in
+# hexa/config.yaml.
 
 # Run tests
 .venv\Scripts\python.exe -m pytest hexa/tests/ -v
@@ -171,10 +179,15 @@ Condensed per-module results (final run, TTY -v output):
 ```
 ============================= test session starts =============================
 platform win32 -- Python 3.12.10, pytest-9.2.0
-collected 156 items
+collected 161 items
 
 test_api_auth.py           11 passed   auth, endpoints, websocket, welcome
                                        page + /health liveness (no token)
+test_port_guard.py          5 passed   [NEW] launch port-guard: free/busy
+                                       ports, holder identification via
+                                       /health ("a running Hexa instance is
+                                       listening there, uptime N s"), probe
+                                       never raises
 test_audio.py               8 passed   stream, consumers, playback handles
 test_config.py              4 passed
 test_events_state.py       12 passed   event bus + state machine
@@ -206,7 +219,7 @@ test_voice.py              11 passed   conversation-mode test rebuilt
 test_wake.py                9 passed   wake guard added: empty-model thread
                                        exits cleanly
 
-====================== 156 passed, 7 warnings in 7.83s =======================
+====================== 161 passed, 7 warnings in 11.85s ======================
 ```
 
 The only warnings are third-party `torch.jit.load` deprecation notices from

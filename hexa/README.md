@@ -108,8 +108,12 @@ mkdir models
 .venv\Scripts\python.exe -m hexa --text
 
 # Full service (API + voice)
-.venv\Scripts\python.exe -m hexa
+.venv\Scripts\python.exe -m hexa --voice
 ```
+
+Launching a second instance while one is running fails fast with a readable
+one-line message (exit code 1, no model loading): "Cannot start Hexa: port
+8000 is already in use (a running Hexa instance is listening there ...)".
 
 Or use the batch file:
 ```
@@ -191,7 +195,7 @@ hexa/
 │       ├── system.py    # get_time, system_status
 │       ├── notes.py     # remember, recall
 │       └── timers.py    # set_timer, dummy tools
-└── tests/               # 156 unit tests
+└── tests/               # 161 unit tests
 ```
 
 ## Configuration
@@ -213,7 +217,7 @@ top-level fields only; nested fields like `llm.host` must be edited in YAML).
 .venv\Scripts\python.exe -m pytest hexa/tests/ -v
 ```
 
-156 tests passing, 0 skipped: config, router fast-path (20+ phrases), full
+161 tests passing, 0 skipped: config, launch port-guard, router fast-path (20+ phrases), full
 native tool-calling cycle (execution, result feedback, final reply, invalid
 tool name/args, blocked tools, round cap, LLM 400/unreachable fallbacks),
 LLM client (envelope wrapping, keep_alive kwarg, typed errors, history),
