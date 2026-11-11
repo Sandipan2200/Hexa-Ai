@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from pynput import keyboard
 
 from hexa.wake import WakeWordDetector, WakeWordConfig, HotkeyListener, HotkeyConfig
 
@@ -158,38 +159,79 @@ class TestHotkeyListener:
         listener.stop()
 
     def test_hotkey_press_release(self, hotkey_config: HotkeyConfig) -> None:
-        """Test hotkey press and release callbacks."""
+        """True combo-state tracking: on_press fires once when the full
+        combination becomes held, on_release fires when any key of it is
+        released (Gate 5: GlobalHotKeys never fired on release, breaking
+        push-to-talk)."""
         press_cb = MagicMock()
         release_cb = MagicMock()
 
-        with patch("hexa.wake.keyboard.GlobalHotKeys") as mock_hotkeys_class:
-            mock_hotkeys = MagicMock()
-            mock_hotkeys_class.return_value = mock_hotkeys
+        with patch("hexa.wake.keyboard.Listener") as mock_listener_class:
+            # No real OS hook; canonical() = identity on the listener INSTANCE
+            # (pynput's canonical is an instance method - Gate 5 lesson)
+            mock_listener_class.return_value.canonical = lambda k: k
 
             listener = HotkeyListener(hotkey_config, press_cb, release_cb)
             listener.start()
 
-            # Simulate hotkey press (call the registered callback)
-            # The callback is registered with the key string
-            registered_callback = mock_hotkeys_class.call_args[0][0].get("<ctrl>+<alt>+<space>")
-            if registered_callback:
-                registered_callback()  # Press
-                time.sleep(0.01)
-                registered_callback()  # Release
+            ctrl, alt, space = keyboard.HotKey.parse("<ctrl>+<alt>+<space>")
+            # Activation must fire exactly when the LAST combo key is pressed
+            listener._on_key_press(ctrl)
+            press_cb.assert_not_called()
+            listener._on_key_press(alt)
+            press_cb.assert_not_called()
+            listener._on_key_press(space)
+            press_cb.assert_called_once()
+
+            # Re-pressing an already-held key must NOT re-fire
+            listener._on_key_press(space)
+            assert press_cb.call_count == 1
+
+            # Releasing ANY combo key deactivates -> release callback
+            listener._on_key_release(space)
+            release_cb.assert_called_once()
+
+            # A second press cycle works (state fully reset on release)
+            listener._on_key_press(space)
+            assert press_cb.call_count == 2
+            listener._on_key_release(alt)
+            assert release_cb.call_count == 2
+
+            listener.stop()
+        mock_listener_class.return_value.stop.assert_called_once()
+
+    def test_hotkey_ignores_unrelated_keys(self, hotkey_config: HotkeyConfig) -> None:
+        """Keys outside the combination must not trigger press or release."""
+        press_cb = MagicMock()
+        release_cb = MagicMock()
+
+        with patch("hexa.wake.keyboard.Listener") as mock_listener_class:
+            mock_listener_class.return_value.canonical = lambda k: k
+
+            listener = HotkeyListener(hotkey_config, press_cb, release_cb)
+            listener.start()
+
+            ctrl, alt, space = keyboard.HotKey.parse("<ctrl>+<alt>+<space>")
+            listener._on_key_press(space)          # partial combo (no ctrl/alt)
+            press_cb.assert_not_called()
+            listener._on_key_release(space)
+            release_cb.assert_not_called()
+
+            # holding shift (unrelated) then releasing: no state corruption
+            listener._on_key_press("unrelated-key")
+            listener._on_key_release("unrelated-key")
+            press_cb.assert_not_called()
+            release_cb.assert_not_called()
 
             listener.stop()
 
-            press_cb.assert_called_once()
-            release_cb.assert_called_once()
-
     def test_hotkey_stop(self, hotkey_config: HotkeyConfig) -> None:
         """Test hotkey listener stop."""
-        with patch("hexa.wake.keyboard.GlobalHotKeys") as mock_hotkeys_class:
-            mock_hotkeys = MagicMock()
-            mock_hotkeys_class.return_value = mock_hotkeys
+        with patch("hexa.wake.keyboard.Listener") as mock_listener_class:
+            mock_listener_class.return_value.canonical = lambda k: k
 
             listener = HotkeyListener(hotkey_config, lambda: None, lambda: None)
             listener.start()
             listener.stop()
 
-            mock_hotkeys.stop.assert_called_once()
+            mock_listener_class.return_value.stop.assert_called_once()

@@ -141,33 +141,64 @@ class WakeWordDetector:
 
 
 class HotkeyListener:
-    """Global hotkey listener for push-to-talk."""
+    """Global hotkey listener for push-to-talk.
+
+    Gate 5 root cause: pynput's GlobalHotKeys fires its callback ONLY on
+    activation (HotKey.release() never invokes the callback), so the previous
+    toggle design misread every 2nd press as a release and could never detect
+    an actual release. This implementation tracks the combination state with a
+    raw Listener and fires on_press()/on_release() at true combo boundaries.
+    """
 
     def __init__(self, config: HotkeyConfig, on_press: Callable[[], None], on_release: Callable[[], None]) -> None:
         self.config = config
         self._on_press = on_press
         self._on_release = on_release
-        self._listener: Optional[keyboard.GlobalHotKeys] = None
-        self._pressed = False
+        self._listener: Optional[keyboard.Listener] = None
+        self._combo: Optional[frozenset] = None  # canonical keys of the combination
+        self._held: set = set()                  # canonical keys currently held
+        self._active = False                     # full combination held right now
 
-    def _parse_key(self) -> dict:
-        """Parse key string to pynput format."""
-        key_str = self.config.key
-        # Convert <ctrl>+<alt>+<space> to {'<ctrl>+<alt>+<space>': callback}
-        # pynput uses format like '<ctrl>+<alt>+<space>'
-        return {key_str: self._on_hotkey}
+    def _parse_combo(self) -> frozenset:
+        """Parse the configured key string into canonical pynput keys."""
+        return frozenset(keyboard.HotKey.parse(self.config.key))
 
-    def _on_hotkey(self) -> None:
-        """Handle hotkey press/release."""
-        if not self._pressed:
-            self._pressed = True
-            logger.debug("Hotkey pressed")
-            emit_event(EventType.HOTKEY_PRESSED)
-            self._on_press()
-        else:
-            self._pressed = False
-            logger.debug("Hotkey released")
-            self._on_release()
+    def _canonical(self, key):
+        """Normalize a listener key event to the form HotKey.parse produced.
+
+        pynput's canonical() is an INSTANCE method (it needs the listener's
+        scan-code translator); calling it on the class raises, which silently
+        disabled the whole hotkey (Gate 5: 0 presses on hardware). Use the live
+        listener instance, falling back to the raw key if unavailable.
+        """
+        listener = self._listener
+        if listener is not None:
+            try:
+                return listener.canonical(key)
+            except Exception:
+                logger.debug("Hotkey: canonicalization failed for %r", key, exc_info=True)
+        return key
+
+    def _on_key_press(self, key, *args) -> None:
+        """Key pressed: activate when the full combination becomes held."""
+        k = self._canonical(key)
+        if k in self._combo and k not in self._held:
+            self._held.add(k)
+            if self._held == self._combo and not self._active:
+                self._active = True
+                logger.debug("Hotkey pressed")
+                emit_event(EventType.HOTKEY_PRESSED)
+                self._on_press()
+
+    def _on_key_release(self, key, *args) -> None:
+        """Key released: deactivate as soon as the combination is no longer held."""
+        k = self._canonical(key)
+        if k in self._held:
+            self._held.discard(k)
+            if self._active and self._held != self._combo:
+                self._active = False
+                logger.debug("Hotkey released")
+                self._on_release()
 
     def start(self) -> None:
         """Start listening for hotkey."""
@@ -176,8 +207,13 @@ class HotkeyListener:
             return
 
         try:
-            hotkey_map = self._parse_key()
-            self._listener = keyboard.GlobalHotKeys(hotkey_map)
+            self._combo = self._parse_combo()
+            self._held = set()
+            self._active = False
+            self._listener = keyboard.Listener(
+                on_press=self._on_key_press,
+                on_release=self._on_key_release,
+            )
             self._listener.start()
             logger.info("Hotkey listener started: %s", self.config.key)
         except Exception as e:

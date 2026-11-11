@@ -281,4 +281,49 @@ GATE 4: PASS
 
 ## Gate 5: Hotkey (Ctrl+Alt+Space)
 
+**Root cause found (source inspection + hardware proof):**
+pynput's `GlobalHotKeys` fires its callback ONLY on activation — `HotKey.release()` provably never invokes the callback (`press()` calls `_on_activate()` when the state set matches; `release()` only mutates state). Hexa's `_on_hotkey` toggle therefore misread every 2nd press as a "release": with 3 press-release cycles the user got exactly 3 invocations, cycle #2 interpreted as RELEASE, and `HOTKEY_PRESSED` emitted only twice.
+
+**Second bug during the fix (mine):** the rewritten `_canonical()` called `keyboard.Listener.canonical()` on the CLASS — but pynput's `canonical` is an instance method needing the listener's scan-code translator (`self._translator`). Every key event raised → handlers silently skipped → 0 presses on hardware. Fixed by canonicalizing on the live listener instance with a raw-key fallback.
+
+**Fix (minimal):**
+- `hexa/hexa/wake.py`: `HotkeyListener` rewritten from `GlobalHotKeys` + toggle to a raw `keyboard.Listener` tracking combination state: `_combo` = `frozenset(keyboard.HotKey.parse(key))`, `_held` = currently held canonical keys, `_active` = full combo flag. `on_press()` fires when the last combo key completes the set (once, re-press guarded); `on_release()` fires when any held combo key is released while active. `HOTKEY_PRESSED` event on true press.
+
+**Files changed:**
+- `hexa/hexa/wake.py` — true press/release combo-state tracking (root cause above)
+- `hexa/tests/test_wake.py` — rewritten hotkey tests: activation only on last combo key, re-press guarded, release on any held key, partial combos ignored, unrelated keys ignored, stop; canonical patched on the listener INSTANCE (pynput lesson)
+- `scripts/gate5_hotkey.py` — Gate 5 diagnostic (true press/release counting + alternation check)
+- `scripts/gate5_canonical_check.py` — canonicalization evidence script
+
+**Real output (hardware, before fix — 3 cycles, 3 invocations, cycle #2 misread):**
+```
++  2.11s  pynput activation #1 -> toggle interprets as PRESS
++  6.06s  pynput activation #2 -> toggle interprets as RELEASE
++  9.59s  pynput activation #3 -> toggle interprets as PRESS
+pynput invocations: 3 for 3 press-release cycles
+CONFIRMED BUG: GlobalHotKeys fires ONLY on activation - releases never arrive.
+```
+**(after the first fix — 0 events, class-level canonical bug):**
+```
+true presses=0 true releases=0
+```
+**(after the canonical fix — two runs, both clean):**
+```
++  9.92s  [true PRESS #1]     + 10.16s  [true RELEASE #1]
++ 11.83s  [true PRESS #2]     + 12.02s  [true RELEASE #2]
++ 13.57s  [true PRESS #3]     + 13.79s  [true RELEASE #3]
+HOTKEY_PRESSED emitted at 9.92s, 11.83s, 13.57s (once per press)
+true presses=3 true releases=3
+```
+(Second run identical: 3.47/3.66, 5.16/5.44, 6.62/6.90.) Note: the diagnostic's "alternating order: CHECK" verdict was a string-matching bug in the checker (it grepped for "pipeline on_press" prefixes while the probe labels are "[true PRESS #N]"); the timeline data above is the proof. Checker fixed for the record.
+
+**Pytest:** 198 passed (full suite).
+
+**USER CONFIRMATION:**
+- [x] Two hardware runs: 3 presses + 3 releases, alternating, 3/3 HOTKEY_PRESSED (user pasted both)
+
+---
+
+## Gate 6: Wake word
+
 *In progress...*
