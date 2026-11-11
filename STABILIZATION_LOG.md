@@ -160,6 +160,13 @@ TEST 4: Interrupt mid-sentence
 **Pytest:** 189 passed (full suite).
 
 **USER CONFIRMATION:**
-- [ ] Heard "Hello, I am Hexa" via Piper, sounds natural / correct speed
-- [ ] Heard pyttsx3 fallback
-- [ ] Interrupt stopped speech mid-sentence
+- [x] Heard "Hello, I am Hexa" via Piper, sounds natural / correct speed
+- [x] Heard pyttsx3 fallback
+- [x] Interrupt stopped speech mid-sentence
+- (user: "pass"; repo connected to https://github.com/Sandipan2200/Hexa-Ai.git and pushed)
+
+---
+
+## Gate 3: STT
+
+*In progress...*
