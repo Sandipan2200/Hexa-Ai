@@ -25,6 +25,7 @@ class AudioConfig:
     chunk_size: int = 1280  # 80ms at 16kHz
     input_device: Optional[int] = None
     dtype: str = "int16"
+    use_polling: bool = False  # Use polling thread instead of callback (for WDM-KS devices)
 
 
 class AudioStream:
@@ -41,6 +42,7 @@ class AudioStream:
         self._consumer_lock = threading.Lock()
         self._overflow_count = 0
         self._last_chunk_time = 0.0
+        self._poll_thread: Optional[threading.Thread] = None  # polling mode thread
 
     def register_consumer(self, maxsize: int = 100) -> queue.Queue[np.ndarray]:
         """Register a new consumer queue for audio chunks."""
@@ -60,13 +62,16 @@ class AudioStream:
         if status:
             logger.warning("Audio callback status: %s", status)
 
-        # Convert to int16 mono
-        if indata.dtype != np.int16:
-            chunk = (indata * 32767).astype(np.int16)
-        else:
-            chunk = indata.copy()
+        self._process_chunk(indata)
 
-        # Ensure mono
+    def _process_chunk(self, chunk: np.ndarray) -> None:
+        """Normalize a raw capture block to int16 mono and distribute to consumers."""
+        if chunk.dtype != np.int16:
+            chunk = (chunk * 32767).astype(np.int16)
+        else:
+            chunk = chunk.copy()
+
+        # Ensure mono (take channel 0; Intel SST arrays expose ch0 as beamformed)
         if chunk.ndim > 1 and chunk.shape[1] > 1:
             chunk = chunk[:, 0:1]
 
@@ -76,7 +81,6 @@ class AudioStream:
         # Calculate RMS for audio level event
         if len(chunk) > 0:
             rms = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
-            # Emit ~20x/sec (every 80ms chunk)
             if now - self._last_chunk_time >= 0.05:  # throttle to ~20Hz
                 emit_event(EventType.AUDIO_LEVEL, rms_mic=rms)
                 self._last_chunk_time = now
@@ -91,12 +95,63 @@ class AudioStream:
                     if self._overflow_count % 100 == 1:
                         logger.warning("Audio queue overflow (count=%d)", self._overflow_count)
 
+    def _poll_loop(self) -> None:
+        """Polling capture loop for devices whose driver drops PortAudio callbacks
+        (e.g. Intel SST arrays exposed only via WDM-KS). Uses sd.rec in short
+        blocking windows - proven to deliver real audio on this hardware.
+
+        Captures in 5-chunk windows and splits, since a single sd.rec call per
+        80ms chunk is too slow (stream open/close overhead > 80ms)."""
+        chunk = self.config.chunk_size
+        window_chunks = 10  # capture 10 x 80ms = 800ms per sd.rec call (amortize overhead)
+        window_samples = chunk * window_chunks
+        chunk_seconds = chunk / self.config.sample_rate
+        logger.info("Audio polling loop started (window=%d samples = %.0fms, chunk=%d)",
+                    window_samples, window_samples / self.config.sample_rate * 1000, chunk)
+        while self._running:
+            start = time.perf_counter()
+            try:
+                # Blocking capture of one window worth of audio
+                data = sd.rec(
+                    window_samples,
+                    samplerate=self.config.sample_rate,
+                    channels=self.config.channels,
+                    dtype=self.config.dtype,
+                    device=self.config.input_device,
+                )
+                sd.wait()
+            except Exception as e:
+                logger.exception("Polling capture failed")
+                emit_event(EventType.ERROR, source="audio", error=f"Capture failed: {e}")
+                time.sleep(0.1)
+                continue
+            # Split window into chunk-sized pieces and distribute
+            for i in range(0, len(data), chunk):
+                piece = data[i:i + chunk]
+                if len(piece) < chunk:
+                    piece = np.pad(piece, (0, chunk - len(piece)), mode="constant")
+                self._process_chunk(piece)
+            # Pace: keep roughly real-time
+            elapsed = time.perf_counter() - start
+            delay = window_seconds = window_samples / self.config.sample_rate - elapsed
+            if delay > 0:
+                time.sleep(delay)
+
     def start(self) -> None:
         """Start the audio input stream."""
         if self._running:
             return
 
         try:
+            if self.config.use_polling:
+                self._running = True
+                self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+                self._poll_thread.start()
+                logger.info("Audio polling stream started: %dHz, %dch, chunk=%d, device=%s",
+                            self.config.sample_rate, self.config.channels,
+                            self.config.chunk_size, self.config.input_device)
+                return
+
             self._stream = sd.InputStream(
                 samplerate=self.config.sample_rate,
                 channels=self.config.channels,
@@ -110,6 +165,7 @@ class AudioStream:
             logger.info("Audio stream started: %dHz, %dch, chunk=%d",
                         self.config.sample_rate, self.config.channels, self.config.chunk_size)
         except Exception as e:
+            self._running = False
             logger.exception("Failed to start audio stream")
             emit_event(EventType.ERROR, source="audio", error=f"Failed to start mic: {e}")
             raise
@@ -120,6 +176,9 @@ class AudioStream:
             return
 
         self._running = False
+        if self._poll_thread:
+            self._poll_thread.join(timeout=2.0)
+            self._poll_thread = None
         if self._stream:
             try:
                 self._stream.stop()
@@ -150,6 +209,7 @@ def get_audio_stream(config: Optional[AudioConfig] = None) -> AudioStream:
                 channels=cfg.audio.channels,
                 chunk_size=cfg.audio.chunk_size,
                 input_device=cfg.audio.input_device,
+                use_polling=cfg.audio.use_polling,
             )
         _audio_stream = AudioStream(config)
     return _audio_stream

@@ -35,6 +35,52 @@ def test_audio_stream_start_stop(audio_config: AudioConfig) -> None:
         mock_stream.close.assert_called_once()
 
 
+def test_audio_stream_polling_mode(audio_config: AudioConfig) -> None:
+    """Test polling mode lifecycle: no InputStream, a thread that captures via sd.rec.
+
+    Polling mode exists because Intel SST mic arrays exposed only via WDM-KS
+    deliver no PortAudio callbacks (Gate 1 root cause).
+    """
+    poll_config = AudioConfig(
+        sample_rate=16000, chunk_size=1280, channels=4, input_device=21, use_polling=True
+    )
+    fake_window = np.zeros((12800, 4), dtype=np.int16)
+    with patch("hexa.audio.sd.rec", return_value=fake_window) as mock_rec, \
+         patch("hexa.audio.sd.wait") as mock_wait:
+        stream = AudioStream(poll_config)
+        q = stream.register_consumer()
+        stream.start()
+
+        assert stream.is_running()
+
+        # Wait until the polling thread has distributed at least one chunk
+        chunk = q.get(timeout=2.0)
+        assert len(chunk) == 1280
+        mock_rec.assert_called()  # capture actually happens via sd.rec
+        mock_wait.assert_called()
+
+        stream.stop()
+        assert not stream.is_running()
+        # InputStream must never be created in polling mode
+        assert stream._stream is None
+
+
+def test_process_chunk_multichannel_to_mono(audio_config: AudioConfig) -> None:
+    """Multi-channel input must be reduced to channel 0 mono chunks."""
+    stream = AudioStream(audio_config)
+    q = stream.register_consumer()
+
+    # 2-channel block, channel 0 loud, channel 1 noise
+    stereo = np.zeros((1280, 2), dtype=np.int16)
+    stereo[:, 0] = 10000
+    stereo[:, 1] = 12345
+    stream._process_chunk(stereo)
+
+    chunk = q.get(timeout=0.1)
+    assert chunk.shape == (1280,)
+    assert np.all(chunk == 10000)  # channel 0 only, channel 1 discarded
+
+
 def test_audio_stream_consumer_registration(audio_config: AudioConfig) -> None:
     """Test registering and unregistering consumers."""
     with patch("hexa.audio.sd.InputStream"):

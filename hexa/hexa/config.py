@@ -16,6 +16,7 @@ class AudioConfig(BaseModel):
     channels: int = 1
     chunk_size: int = 1280
     input_device: int | None = None
+    use_polling: bool = False
 
 
 class WakeWordConfig(BaseModel):

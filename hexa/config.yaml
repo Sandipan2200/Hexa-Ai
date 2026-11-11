@@ -1,8 +1,9 @@
 audio:
   sample_rate: 16000
-  channels: 1
+  channels: 4
   chunk_size: 1280
-  input_device: null
+  input_device: 21
+  use_polling: true
 wake_word:
   enabled: true
   model_name: hey_jarvis
