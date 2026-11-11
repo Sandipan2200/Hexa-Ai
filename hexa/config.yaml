@@ -2,7 +2,7 @@ audio:
   sample_rate: 16000
   channels: 4
   chunk_size: 1280
-  input_device: 21
+  input_device: "Microphone Array"
   use_polling: true
 wake_word:
   enabled: true

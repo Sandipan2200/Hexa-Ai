@@ -35,34 +35,141 @@ def test_audio_stream_start_stop(audio_config: AudioConfig) -> None:
         mock_stream.close.assert_called_once()
 
 
-def test_audio_stream_polling_mode(audio_config: AudioConfig) -> None:
-    """Test polling mode lifecycle: no InputStream, a thread that captures via sd.rec.
+def _fake_devices() -> list[dict]:
+    """Deterministic device list mirroring the Gate 3 hardware: the same Intel
+    SST array exposed via MME (works, 4ch@44.1k) and WDM-KS (serves
+    misformatted data, 4ch@16k), plus the Realtek mapper pins."""
+    return [
+        {"name": "Microsoft Sound Mapper - Input", "max_input_channels": 2,
+         "default_samplerate": 44100.0, "hostapi": 0},
+        {"name": "Microphone Array (2- Intel SST)", "max_input_channels": 4,
+         "default_samplerate": 44100.0, "hostapi": 0},
+        {"name": "Microphone (Realtek HD Audio Mic input)", "max_input_channels": 2,
+         "default_samplerate": 44100.0, "hostapi": 3},
+        {"name": "Microphone Array 3 ()", "max_input_channels": 4,
+         "default_samplerate": 16000.0, "hostapi": 3},
+    ]
 
-    Polling mode exists because Intel SST mic arrays exposed only via WDM-KS
-    deliver no PortAudio callbacks (Gate 1 root cause).
+
+def test_resolver_prefers_non_wdmks_name_match() -> None:
+    """A matching name on a healthy host API must win over the WDM-KS pin.
+
+    Gate 3: the array's WDM-KS 16kHz pin serves misformatted data; its MME
+    44.1kHz pin works. Both names contain the configured substring, so WDM-KS
+    must be deprioritized.
     """
+    with patch("hexa.audio.sd.query_devices", return_value=_fake_devices()):
+        stream = AudioStream(AudioConfig(
+            sample_rate=16000, channels=4, input_device="Microphone Array", use_polling=True))
+        idx, ch, native = stream._resolve_input_device()
+    assert (idx, ch, native) == (1, 4, 44100)
+
+
+def test_resolver_valid_int_used_directly() -> None:
+    """A still-valid int index is honored as-is (channels clamped to device)."""
+    with patch("hexa.audio.sd.query_devices", return_value=_fake_devices()):
+        stream = AudioStream(AudioConfig(
+            sample_rate=16000, channels=4, input_device=1, use_polling=True))
+        idx, ch, native = stream._resolve_input_device()
+    assert (idx, ch, native) == (1, 4, 44100)
+
+
+def test_resolver_stale_int_does_not_crash() -> None:
+    """A stale int index (device list shifted between sessions) must fall back
+    to resolution instead of failing the stream."""
+    with patch("hexa.audio.sd.query_devices", return_value=_fake_devices()):
+        stream = AudioStream(AudioConfig(
+            sample_rate=16000, channels=4, input_device=21, use_polling=True))
+        idx, ch, native = stream._resolve_input_device()
+    assert idx is not None          # resolved to some valid input
+    assert ch >= 1
+    assert native > 0
+
+
+def test_resolver_wdmks_only_when_no_healthy_match() -> None:
+    """If only a WDM-KS device matches the configured name, it is still used
+    (better than no input at all) - but only as a last resort."""
+    with patch("hexa.audio.sd.query_devices", return_value=_fake_devices()):
+        stream = AudioStream(AudioConfig(
+            sample_rate=16000, channels=2, input_device="Realtek", use_polling=True))
+        idx, ch, native = stream._resolve_input_device()
+    assert (idx, ch, native) == (2, 2, 44100)
+
+
+def test_resolver_no_match_falls_back_to_os_default() -> None:
+    """An unresolvable name falls back to the OS default input (device=None).
+    Deliberately NOT a native-rate auto-match: that would re-select the
+    poisoned WDM-KS 16kHz pin on this hardware."""
+    with patch("hexa.audio.sd.query_devices", return_value=_fake_devices()):
+        stream = AudioStream(AudioConfig(
+            sample_rate=16000, channels=4, input_device="Nonexistent Mic", use_polling=True))
+        idx, ch, native = stream._resolve_input_device()
+    assert idx is None
+
+
+def test_audio_stream_polling_mode(audio_config: AudioConfig) -> None:
+    """Polling mode lifecycle: no InputStream, NATIVE-rate sd.rec capture,
+    mono downmix, resample to 16kHz, chunk distribution.
+
+    Polling + native-rate capture exists because (Gate 1) Intel SST arrays
+    drop PortAudio callbacks and (Gate 3) the array's WDM-KS 16kHz pin serves
+    misformatted data - valid audio only arrives via its MME 44.1kHz pin.
+    """
+    devices = _fake_devices()
     poll_config = AudioConfig(
-        sample_rate=16000, chunk_size=1280, channels=4, input_device=21, use_polling=True
+        sample_rate=16000, chunk_size=1280, channels=4,
+        input_device="Microphone Array", use_polling=True
     )
-    fake_window = np.zeros((12800, 4), dtype=np.int16)
-    with patch("hexa.audio.sd.rec", return_value=fake_window) as mock_rec, \
-         patch("hexa.audio.sd.wait") as mock_wait:
+    # 800ms window at 44100Hz = 35280 frames; constant 8000 on every channel
+    fake_window = np.full((35280, 4), 8000, dtype=np.int16)
+    mock_stream = MagicMock()
+    mock_stream.read.return_value = (fake_window, False)
+    with patch("hexa.audio.sd.query_devices", return_value=devices), \
+         patch("hexa.audio.sd.InputStream", return_value=mock_stream) as mock_cls:
         stream = AudioStream(poll_config)
         q = stream.register_consumer()
         stream.start()
 
         assert stream.is_running()
+        assert stream._capture_device == 1          # MME pin, not the WDM-KS pin
+        assert stream._capture_native_rate == 44100
 
-        # Wait until the polling thread has distributed at least one chunk
-        chunk = q.get(timeout=2.0)
-        assert len(chunk) == 1280
-        mock_rec.assert_called()  # capture actually happens via sd.rec
-        mock_wait.assert_called()
+        chunk = q.get(timeout=5.0)
+        assert chunk.shape == (1280,)
+        # Downmix+resample of a constant must stay that constant (unit DC gain)
+        assert int(np.abs(chunk.astype(np.int32) - 8000).max()) <= 100
+
+        # ONE persistent pull-mode capture stream at the device's NATIVE rate
+        mock_cls.assert_called_once()
+        assert mock_cls.call_args.kwargs["samplerate"] == 44100
+        mock_stream.read.assert_called()            # blocking read, not sd.rec
 
         stream.stop()
         assert not stream.is_running()
-        # InputStream must never be created in polling mode
+        # InputStream must never be created in polling mode (callback path)
         assert stream._stream is None
+
+
+def test_poll_resample_44k_to_16k_sine() -> None:
+    """The 44100->16000 resample must preserve tone frequency and window length
+    (800ms @44100 = 35280 samples -> exactly 12800 samples @16kHz)."""
+    stream = AudioStream(AudioConfig(sample_rate=16000, chunk_size=1280, channels=4))
+    stream._capture_device = 1
+    stream._capture_channels = 4
+    stream._capture_native_rate = 44100
+
+    t = np.arange(35280) / 44100.0
+    sine = (np.sin(2 * np.pi * 1000.0 * t) * 8000).astype(np.int16)
+    window = np.stack([sine] * 4, axis=1)
+
+    pcm = stream._resample_window(window)
+    assert len(pcm) == 12800
+    assert pcm.dtype == np.int16
+
+    # The 1kHz tone must survive the resample (dominant spectral peak)
+    spec = np.abs(np.fft.rfft(pcm.astype(np.float32)))
+    freqs = np.fft.rfftfreq(len(pcm), 1 / 16000)
+    assert abs(freqs[int(np.argmax(spec))] - 1000.0) < 50
 
 
 def test_process_chunk_multichannel_to_mono(audio_config: AudioConfig) -> None:

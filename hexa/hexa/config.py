@@ -15,7 +15,7 @@ class AudioConfig(BaseModel):
     sample_rate: int = 16000
     channels: int = 1
     chunk_size: int = 1280
-    input_device: int | None = None
+    input_device: int | str | None = None
     use_polling: bool = False
 
 

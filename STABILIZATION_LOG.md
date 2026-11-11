@@ -169,4 +169,65 @@ TEST 4: Interrupt mid-sentence
 
 ## Gate 3: STT
 
+**Root cause chain (three layers deep):**
+
+1. **Hardcoded device index unstable.** Device indexes shift whenever the user's OnePlus Nord Buds connect/disconnect: `21` → `20` → `25` → `31` across sessions. `PortAudioError: Error querying device 21` on a fresh session. Fix: resolve by name substring + characteristics, never by index.
+2. **The WDM-KS 16 kHz pin serves misformatted data.** Deep-dive (`gate3_debug.py`, `gate3_formats.py`) proved the array's WDM-KS pin (formerly the target) never delivered true audio:
+   - Spectrum of its output: all energy at 0–1.4 Hz (a full-scale slowly-drifting constant), speech-band fraction 0.308, Silero VAD probs max 0.018 (real speech > 0.9).
+   - Format probing: `float32` → **NaN** everywhere; `int16` → spikes (crest 300) vs the same physical array's MME pin: self-consistent across int16/int32/float32 (crest ~14–15 on room tone, DC≈0).
+   - So Gate 1's "real audio" (peak 24576, user heard playback crackle) was misformatted data, not speech. My error for not catching it then.
+3. **Per-window `sd.rec` re-open overhead loses audio.** Even on the correct MME pin @44100, a fresh `sd.rec`+`sd.wait` per 800 ms window re-opens the device each time: measured **2.4 s of audio per 4 s wall (40% loss)**. Fix: ONE persistent pull-mode `InputStream` opened once in the capture thread, blocking `read()` per window: **9.6 s per 10 s wall** (one-time open cost only, zero per-window loss, no overflows).
+
+**Fix (minimal):**
+- `hexa/hexa/audio.py`:
+  - `_resolve_input_device()` → `(index, channels, native_rate)`: valid int honored; stale int warns and falls back; name substring match preferring healthy host APIs (MME/DirectSound/WASAPI) and deprioritizing WDM-KS; OS default as last resort. Deliberately NO auto-match by native rate — that would re-select the poisoned WDM-KS 16 kHz pin.
+  - `_poll_loop()` rewritten: opens ONE pull-mode `sd.InputStream` at the device NATIVE rate (MME pin: 44100 Hz, 4ch), blocking `read()` per 800 ms window, mean-downmix to mono, `scipy.signal.resample_poly` to the configured 16 kHz with `padtype="line"` (default zero-pad leaves a filter transient — an audible micro-click at every window edge; measured max deviation 2548 → 0.47), pad/trim to exactly 12800 samples, split into 1280-sample chunks for consumers.
+  - `_resample_window()` helper factored out (unit-testable).
+  - `AudioConfig.input_device: int | str | None` (str name matching).
+- `hexa/hexa/config.py`: `input_device: int | str | None`.
+- `hexa/config.yaml`: `input_device: "Microphone Array"` (matches the working MME pin first).
+- `hexa/tests/test_audio.py`: resolver tests (name prefers non-WDM-KS, valid int honored, stale int survives, WDM-KS only as last resort, no-match → OS default), native-rate polling lifecycle test, 44100→16000 resample sine test (length + 1 kHz tone preserved).
+
+**Files changed:**
+- `hexa/hexa/audio.py` — resolver + persistent pull-mode capture + native-rate resample (root causes above)
+- `hexa/hexa/config.py` — `input_device` accepts device-name strings
+- `hexa/config.yaml` — `input_device: "Microphone Array"`
+- `hexa/tests/test_audio.py` — 6 new/updated regression tests
+- `scripts/gate3_stt.py` — Gate 3 main diagnostic (mic→Whisper + TTS→STT roundtrip with WER)
+- `scripts/gate3_channels.py` — per-channel stats + transcription evidence
+- `scripts/gate3_debug.py` — spectrum/VAD evidence (WDM-KS garbage)
+- `scripts/gate3_formats.py` — format-mismatch evidence (float32→NaN on WDM-KS)
+- `scripts/gate3_mme_test.py` — MME pin + resample per-channel WER test (user-run)
+- `scripts/gate3_smoke.py` — no-speech pacing smoke of the real stack
+- `scripts/gate3_loopback.py` — automated speaker→mic loopback (inconclusive: speakers muted)
+- `scripts/gate3_level_test.py`, `scripts/gate3_clip_test.py` — level/clipping hypothesis tests (both ruled out)
+- `scripts/gate3_padtype_test.py` — resample edge-padding evidence
+- `scripts/list_inputs.py`, `scripts/list_outputs.py` — device listing helpers
+
+**Real output (user's spoken runs, `gate3_mme_test.py` — MME capture @44100 → resample 16k → real Whisper):**
+```
+Run 1: mix WER=30% 'Exa is a local voice assistant that draws completely off.'
+Run 2: mix WER=70% (outlier — spoke late; garbled words confirm, not a pipeline fault)
+Run 3: ch0/ch1 WER=10% 'Hexa is a local voice assistant that runs completely off'
+Run 4: mix WER=20% 'Alexa is a local voice assistant that runs completely offline.'
+Run 5: ch0/ch1/mix WER=10% 'HEXA is a local voice assistant that runs completely offline.'
+```
+Per-channel note: ch0/ch1 carry identical signal (rms 609–951 across runs), ch2/ch3 dead (rms 0) — the array is effectively mono duplicated. Known quirk: "Rekha"/"Alexa"/"Exa" for "Hexa" in some runs — raw-channel quality of the array, not pipeline.
+
+**Machine-verified (automated, no human):**
+- TTS→STT roundtrip (clean audio): **WER 0.0%** — "The quick brown fox jumps over the lazy dog."
+- Whisper level sensitivity: perfect transcription down to −42 dBFS (level ruled out as cause).
+- Real stack pacing: `chunks=120 total=9.60s` per 10 s wall, no overflow.
+- Resample: 35280@44100 → exactly 12800@16000; 1 kHz sine preserved; constant preserved (edge padding fixed).
+
+**Pytest:** 195 passed (full suite, 2:10).
+
+**USER CONFIRMATION:**
+- [x] User ran 5 spoken runs; best WER 10% with "HEXA is a local voice assistant that runs completely offline."
+- [x] Gate 3 accepted on this evidence (user pasted runs as proof; formal `gate3_stt.py` stack run optional for the record)
+
+---
+
+## Gate 4: VAD auto-stop
+
 *In progress...*
