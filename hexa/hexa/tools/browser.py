@@ -4,29 +4,43 @@ from __future__ import annotations
 import logging
 import urllib.parse
 import webbrowser
+from typing import Annotated, Literal
+
 from hexa.tools import tool
 from hexa.config import get_config
 
 logger = logging.getLogger(__name__)
 
 
-@tool
-def open_tabs(sites: list[str]) -> str:
-    """Open multiple sites as Chrome tabs from the whitelist."""
+def _get_site_whitelist() -> dict[str, str]:
+    """Get the current site whitelist from config."""
     config = get_config()
-    site_map = config.sites
+    return config.sites
 
-    valid_sites = []
-    for site in sites:
-        site_lower = site.lower().strip()
-        if site_lower in site_map:
-            valid_sites.append(site_map[site_lower])
-        else:
-            logger.warning("Unknown site requested: %s", site)
 
-    if not valid_sites:
-        available = ", ".join(sorted(site_map.keys()))
-        return f"No valid sites. Available: {available}"
+def _get_site_keys() -> list[str]:
+    """Get the list of valid site keys."""
+    return list(_get_site_whitelist().keys())
+
+
+@tool
+def open_tabs(sites: Annotated[list[str], "List of site keys from whitelist"]) -> str:
+    """Open multiple sites as Chrome tabs from the whitelist.
+
+    Args:
+        sites: List of site keys (must be from configured whitelist: youtube, gmail, github, etc.)
+    """
+    site_map = _get_site_whitelist()
+    valid_keys = set(site_map.keys())
+
+    # Validate all sites against whitelist
+    invalid = [s for s in sites if s.lower().strip() not in valid_keys]
+    if invalid:
+        available = ", ".join(sorted(valid_keys))
+        logger.warning("Unknown site(s) requested: %s", invalid)
+        return f"Unknown site(s): {', '.join(invalid)}. Available: {available}"
+
+    valid_sites = [site_map[s.lower().strip()] for s in sites]
 
     for url in valid_sites:
         try:

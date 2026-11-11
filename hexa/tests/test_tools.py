@@ -127,9 +127,10 @@ def test_type_hints_conversion(registry: ToolRegistry) -> None:
 # Tool function tests with mocks
 
 def test_open_app_tool() -> None:
-    """Test open_app tool."""
+    """Test open_app tool with pre-populated index (no auto-discovery)."""
     from hexa.tools.apps import open_app
     from hexa.config import get_config
+    from hexa.tools.app_discovery import DiscoveredApp
 
     # Mock config
     import hexa.tools.apps
@@ -140,10 +141,22 @@ def test_open_app_tool() -> None:
 
     hexa.tools.apps.get_config = lambda: MockConfig()
 
-    # Clear the app index to avoid interference from previous test runs
+    # Pre-populate the app index to avoid auto-discovery
     from hexa.tools.app_index import get_app_index
     index = get_app_index()
     index.clear()
+    index.bulk_upsert({
+        "notepad": DiscoveredApp(
+            app_id="notepad",
+            display_name="Notepad",
+            normalized_name="notepad",
+            executable=r"C:\Windows\System32\notepad.exe",
+            aumid=None,
+            source="system32",
+            aliases=["notepad", "text editor"],
+            last_discovered=0,
+        )
+    })
 
     # Mock both Path.exists and subprocess.Popen
     with patch("pathlib.Path.exists", return_value=True), \
@@ -153,12 +166,57 @@ def test_open_app_tool() -> None:
         # New implementation uses list args, no shell=True
         mock_popen.assert_called_once()
         args, kwargs = mock_popen.call_args
-        assert args[0] == ["notepad.exe"]
+        assert args[0][0].endswith("\\notepad.exe")
         assert "shell" not in kwargs or kwargs.get("shell") is False
 
     # Unknown app
     result = open_app("unknown")
     assert "Unknown app" in result
+
+    hexa.tools.apps.get_config = original_get_config
+
+
+def test_open_app_auto_discovery() -> None:
+    """Test open_app runs discovery automatically when index is empty."""
+    from hexa.tools.apps import open_app
+    import hexa.tools.apps
+    original_get_config = hexa.tools.apps.get_config
+
+    class MockConfig:
+        apps = {"notepad": "notepad.exe", "calc": "calc.exe"}
+
+    hexa.tools.apps.get_config = lambda: MockConfig()
+
+    # Clear the app index to simulate fresh start
+    from hexa.tools.app_index import get_app_index
+    index = get_app_index()
+    index.clear()
+    assert index.count() == 0
+
+    # Mock discovery to return a proper DiscoveredApp
+    from hexa.tools.app_discovery import DiscoveredApp
+    with patch("hexa.tools.app_discovery.get_discovery") as mock_get_discovery, \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("subprocess.Popen") as mock_popen:
+
+        mock_discovery = MagicMock()
+        mock_discovery.discover_all.return_value = {
+            "notepad": DiscoveredApp(
+                app_id="notepad",
+                display_name="Notepad",
+                normalized_name="notepad",
+                executable=r"C:\Windows\System32\notepad.exe",
+                aumid=None,
+                source="system32",
+                aliases=["notepad", "text editor"],
+                last_discovered=0,
+            )
+        }
+        mock_get_discovery.return_value = mock_discovery
+
+        result = open_app("notepad")
+        assert "Opened Notepad" in result or "Opened notepad" in result
+        mock_popen.assert_called_once()
 
     hexa.tools.apps.get_config = original_get_config
 
@@ -183,7 +241,8 @@ def test_open_tabs_tool() -> None:
 
     # Unknown sites
     result = open_tabs(["unknown"])
-    assert "No valid sites" in result
+    assert "Unknown site" in result
+    assert "Available:" in result
 
     hexa.tools.browser.get_config = original_get_config
 

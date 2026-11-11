@@ -31,6 +31,15 @@ def _resolve_app(name: str) -> IndexedApp | None:
     """
     index = get_app_index()
 
+    # If index is empty, run discovery once automatically
+    if index.count() == 0:
+        logger.info("App index empty, running automatic discovery...")
+        from hexa.tools.app_discovery import get_discovery
+        discovery = get_discovery()
+        discovered = discovery.discover_all()
+        if discovered:
+            index.bulk_upsert(discovered)
+
     # Try intelligent matching on the index
     matches = index.find_best_match(name)
 
@@ -108,6 +117,7 @@ def open_app(name: str) -> str:
     - Fuzzy fallback for typos
     - Falls back to legacy config.yaml whitelist
 
+    If the index is empty, runs discovery once automatically.
     If multiple apps match closely, returns a disambiguation message.
     """
     app = _resolve_app(name)

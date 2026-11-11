@@ -82,7 +82,7 @@ class APIConfig(BaseModel):
 
 
 class Config(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="HEXA_", case_sensitive=False)
+    model_config = SettingsConfigDict(env_prefix="HEXA_", case_sensitive=False, env_nested_delimiter="__")
 
     audio: AudioConfig = Field(default_factory=AudioConfig)
     wake_word: WakeWordConfig = Field(default_factory=WakeWordConfig)
