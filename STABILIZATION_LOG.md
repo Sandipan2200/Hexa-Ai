@@ -110,4 +110,56 @@ OK: venv python receives real mic audio
 
 **USER CONFIRMATION:**
 - [x] 440 Hz tone heard — user: "yea i did hear it"
-- [ ] Recording playback heard / sounded clear — awaiting user reply
+- [x] Recording playback heard / sounded clear — user: "pass"
+
+---
+
+## Gate 2: TTS
+
+**Root cause found:**
+`TTSManager.speak()` passes Piper's output — a complete WAV **file** (44-byte RIFF header + PCM) — to `play_audio_bytes*()`, which decoded it with `np.frombuffer(audio_bytes, np.int16)`. The 44-byte header was decoded as 22 int16 "samples" of garbage → an audible click at the start of **every** utterance, on both the Piper and pyttsx3 paths.
+
+**Fix (minimal, one place):**
+- `hexa/hexa/audio.py`: added `_decode_int16_bytes()` which detects RIFF/WAVE containers, parses them with the `wave` module, strips the header, returns the true rate (mono downmix when needed). `play_audio_bytes` / `play_audio_bytes_async` use it and trust the container rate over the caller's.
+
+**Files changed:**
+- `hexa/hexa/audio.py` — WAV-aware decoding in the two play_audio_bytes functions (root cause above)
+- `hexa/tests/test_audio.py` — regression test `test_decode_int16_bytes_wav_header_stripped`
+- `scripts/gate2_tts.py` — Gate 2 diagnostic (real Piper + pyttsx3 + interrupt)
+
+**Diagnostic script:** `scripts/gate2_tts.py`
+
+**Real output (venv python):**
+```
+Piper voice native rate: 22050 Hz
+Config tts.sample_rate:  22050 Hz
+Output device rate:      44100 Hz ([ 3] Speaker (2- Realtek(R) Audio))
+voice vs config: MATCH
+
+TEST 1: Piper speaks 'Hello, I am Hexa'
+  Voice load: 5.31s
+  Synthesis time: 0.26s
+  WAV: rate=22050, ch=1, width=2B, frames=37376 (1.70s), bytes=74796, header=44
+  Playback done (2.30s)
+  Decoded audio: sr=22050, peak=1.000, rms=0.159
+
+TEST 2: TTSManager.speak (the path voice mode actually uses)
+  speak() returned in 0.27s
+  Playback complete
+
+TEST 3: pyttsx3 fallback
+  Synthesis time: 0.11s, bytes=153022
+  pyttsx3 WAV real rate: 22050 Hz; played at 22050 Hz -> OK
+
+TEST 4: Interrupt mid-sentence
+  Interrupt called at 0.301s after ~2.5s of speech
+  is_speaking after interrupt: False
+  OK: playback stopped
+```
+
+**Pytest:** 189 passed (full suite).
+
+**USER CONFIRMATION:**
+- [ ] Heard "Hello, I am Hexa" via Piper, sounds natural / correct speed
+- [ ] Heard pyttsx3 fallback
+- [ ] Interrupt stopped speech mid-sentence

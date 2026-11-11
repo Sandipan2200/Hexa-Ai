@@ -1,10 +1,12 @@
 """Shared audio input stream and playback for Hexa."""
 from __future__ import annotations
 
+import io
 import logging
 import queue
 import threading
 import time
+import wave
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -225,6 +227,27 @@ def shutdown_audio_stream() -> None:
 
 # --- Playback ---
 
+def _decode_int16_bytes(audio_bytes: bytes) -> tuple[np.ndarray, int]:
+    """Decode raw bytes as int16 PCM.
+
+    Callers pass either raw PCM frames or complete WAV files (Piper/pyttsx3
+    produce WAV containers). If the bytes start with a RIFF/WAVE header, the
+    header is parsed and stripped - decoding it as audio produced an audible
+    click at the start of every utterance (Gate 2 root cause).
+    Returns (float32 mono data, sample rate).
+    """
+    if audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
+        with wave.open(io.BytesIO(audio_bytes), "rb") as wf:
+            rate = wf.getframerate()
+            channels = wf.getnchannels()
+            frames = wf.readframes(wf.getnframes())
+        data = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32767.0
+        if channels > 1:
+            data = data[::channels]
+        return data, rate
+    return np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0, -1
+
+
 def play_wav_file(path: str, blocking: bool = True) -> None:
     """Play a WAV file through the default output device."""
     try:
@@ -239,9 +262,11 @@ def play_wav_file(path: str, blocking: bool = True) -> None:
 
 
 def play_audio_bytes(audio_bytes: bytes, sample_rate: int, blocking: bool = True) -> None:
-    """Play raw audio bytes (int16) through the default output device."""
+    """Play raw audio bytes (int16 PCM or a WAV file) through the default output."""
     try:
-        data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+        data, wav_rate = _decode_int16_bytes(audio_bytes)
+        if wav_rate > 0:
+            sample_rate = wav_rate  # trust the container's rate over the caller's
         sd.play(data, sample_rate, blocking=blocking)
     except Exception as e:
         logger.exception("Failed to play audio bytes")
@@ -299,12 +324,14 @@ def play_wav_async(path: str) -> PlaybackHandle:
 
 
 def play_audio_bytes_async(audio_bytes: bytes, sample_rate: int) -> PlaybackHandle:
-    """Play raw audio bytes asynchronously, returns handle for interruption."""
+    """Play raw audio bytes (int16 PCM or a WAV file) asynchronously."""
     handle = PlaybackHandle()
 
     def _play() -> None:
         try:
-            data = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32767.0
+            data, wav_rate = _decode_int16_bytes(audio_bytes)
+            if wav_rate > 0:
+                sample_rate = wav_rate  # trust the container's rate over the caller's
             chunk_size = sample_rate // 10  # 100ms chunks
             for i in range(0, len(data), chunk_size):
                 if handle._stop_event.is_set():

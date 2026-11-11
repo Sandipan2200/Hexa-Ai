@@ -191,6 +191,38 @@ def test_playback_handle(audio_config: AudioConfig) -> None:
     handle.wait()  # Should not block
 
 
+def test_decode_int16_bytes_wav_header_stripped() -> None:
+    """WAV containers must be decoded as PCM data, header stripped (Gate 2).
+
+    Piper/pyttsx3 produce complete WAV files; playing them via np.frombuffer
+    decoded the 44-byte RIFF header as audio - an audible click before every
+    utterance.
+    """
+    import io
+    import wave
+
+    from hexa.audio import _decode_int16_bytes
+
+    pcm = np.arange(0, 800, dtype=np.int16)  # known ramp
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(22050)
+        wf.writeframes(pcm.tobytes())
+    wav_bytes = buf.getvalue()
+
+    data, rate = _decode_int16_bytes(wav_bytes)
+    assert rate == 22050
+    assert len(data) == len(pcm)  # header stripped, no +22 garbage samples
+    np.testing.assert_allclose(data, pcm / 32767.0, atol=1e-6)
+
+    # Raw PCM path still works (no container)
+    raw, rate_raw = _decode_int16_bytes(pcm.tobytes())
+    assert rate_raw == -1
+    np.testing.assert_allclose(raw, pcm / 32767.0, atol=1e-6)
+
+
 def test_global_audio_stream_singleton(audio_config: AudioConfig) -> None:
     """Test global audio stream singleton pattern."""
     shutdown_audio_stream()
