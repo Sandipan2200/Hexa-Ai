@@ -62,6 +62,45 @@ class TestSileroVAD:
         prob = vad.get_speech_prob(chunk)
         assert prob == 0.8
 
+    def test_vad_contiguous_windows(self) -> None:
+        """Silero is STATEFUL: it must see contiguous 512-sample windows.
+
+        The old code truncated every 1280-sample chunk to its first 512
+        samples - feeding a recurrent model decimated slices corrupted its
+        state (Gate 4: speech probability up to 0.99 on room tone).
+        """
+        vad = SileroVAD(threshold=0.5)
+        fake = MagicMock()
+        fake.return_value.item.return_value = 0.7
+        vad._model = fake
+        vad._residual = np.zeros(0, dtype=np.float32)
+
+        prob = vad.get_speech_prob(np.zeros(1280, dtype=np.int16))
+        # 1280 samples -> 2 full windows processed, 256 samples buffered
+        assert fake.call_count == 2
+        for call in fake.call_args_list:
+            assert call.args[0].shape[0] == 512
+        assert prob == 0.7
+
+        prob = vad.get_speech_prob(np.zeros(1280, dtype=np.int16))
+        # residual 256 + 1280 = 1536 -> 3 windows processed, 0 buffered
+        assert fake.call_count == 5
+        assert prob == 0.7
+
+    def test_vad_reset_clears_state(self) -> None:
+        """reset() clears the residual buffer and the model's recurrent state."""
+        vad = SileroVAD(threshold=0.5)
+        fake = MagicMock()
+        fake.return_value.item.return_value = 0.7
+        vad._model = fake
+
+        vad.get_speech_prob(np.zeros(1280, dtype=np.int16))
+        assert len(vad._residual) == 256  # leftover samples buffered
+
+        vad.reset()
+        assert len(vad._residual) == 0
+        fake.reset_states.assert_called_once()
+
 
 class TestWhisperTranscriber:
     """Tests for WhisperTranscriber."""

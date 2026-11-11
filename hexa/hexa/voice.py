@@ -266,8 +266,12 @@ class VoicePipeline:
         self._wake_detector.start()
         self._hotkey_listener.start()
 
-        # Start audio stream
-        get_audio_stream()
+        # Start the shared audio stream (Gate 4 root cause: it was only ever
+        # CREATED here, never STARTED - wake word and recognizer received no
+        # chunks and Hexa was completely deaf in voice mode)
+        stream = get_audio_stream()
+        if not stream.is_running():
+            stream.start()
 
         self._running = True
         logger.info("Voice pipeline started")

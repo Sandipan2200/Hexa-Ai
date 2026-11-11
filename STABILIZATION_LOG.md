@@ -230,4 +230,55 @@ Per-channel note: ch0/ch1 carry identical signal (rms 609–951 across runs), ch
 
 ## Gate 4: VAD auto-stop
 
+**Root causes found (two, both critical):**
+
+1. **Hexa was completely deaf in voice mode.** `VoicePipeline.start()` called `get_audio_stream()` which only *creates* the shared `AudioStream` — **nothing in the entire codebase ever called `.start()`** (not `voice.py`, not `wake.py`'s and `stt.py`'s `start()` which only `register_consumer()`). The polling capture thread never ran → wake word detector and SpeechRecognizer received zero chunks. Every Gate 1–3 diagnostic had worked only because the scripts called `stream.start()` themselves. Evidence: control run showed `vad_events=0` over 6s with `queue_size=0`.
+2. **Silero VAD was fed decimated audio, corrupting its recurrent state.** Silero is a stateful model that must see contiguous 512-sample windows at 16kHz. `get_speech_prob()` truncated every 1280-sample chunk to its first 512 samples (32ms of every 80ms, jumping 768 samples between calls) → probabilities up to **0.99 on room tone** (garbage WDM-KS audio gives 0.018; real silence should be <0.1). Effect: constant false speech detection → synchronous Whisper transcribe (~2–4s block) after every 1.5s of noise → dead air and CPU burn in voice mode.
+
+**Fixes (minimal):**
+- `hexa/hexa/voice.py`: `start()` now starts the stream (`if not stream.is_running(): stream.start()`) — symmetric with its `shutdown_audio_stream()` in `stop()`.
+- `hexa/hexa/stt.py`: `SileroVAD.get_speech_prob()` rewritten to buffer samples (`_residual`) and feed the model **contiguous** 512-sample windows, returning max prob across the chunk's windows; added `reset()` (clears residual + model `reset_states()`), called by `SpeechRecognizer._process_speech()` at utterance boundaries so state doesn't bleed across segments.
+
+**Files changed:**
+- `hexa/hexa/voice.py` — actually start the shared stream in `start()` (root cause 1)
+- `hexa/hexa/stt.py` — contiguous-window Silero feeding + `reset()` (root cause 2)
+- `hexa/tests/test_stt.py` — regression tests: `test_vad_contiguous_windows` (2 windows from 1280 + residual 256, next call 3 windows), `test_vad_reset_clears_state`
+- `scripts/gate4_vad.py` — Gate 4 diagnostic (instrumented VAD probs + auto-stop timing; `--control-only`, `--speech-only`)
+- `scripts/gate4_pipeline_smoke.py` — proves `pipeline.start()` now starts the stream
+- `scripts/gate4_starvation.py` — chunk-flow monitor (proved capture + VAD are real-time with Whisper co-loaded)
+- `scripts/gate4_vad_bench.py` — Silero per-call latency (0.6ms per 1280-chunk after fix; budget 80ms)
+
+**Real output (machine, control/silence):**
+```
+Before fix:  vad_events=0 (deaf) / after stream fix: max_prob=0.991 frac>thr=0.30 (corrupted state)
+After both:  n=60 span=3.74s max_prob=0.009 mean=0.003 frac>thr=0.00, no transcript  (later run: 0.260)
+Pipeline smoke: stream running after pipeline.start(): True (device=1 native=44100)
+```
+
+**Real output (user's spoken run, `gate4_vad.py --speech-only`):**
+```
+>>> TRANSCRIPT FIRED: 'local voice assistant that runs completely offline.'
+speech span: 2.52s -> 5.72s (3.20s of speech chunks), max gap WITHIN speech: 797ms
+VAD AUTO-STOP latency (last speech chunk -> finalize): 1.59s [target ~1.5s]
+transcription after auto-stop: 1.89s (CPU Whisper cost; Gate 7's business)
+WER vs reference: 30.0%
+VAD auto-stop OK (target ~1.5s)
+transcript OK (WER <= 40%)
+GATE 4: PASS
+```
+
+**Known characteristics (deferred, not Gate 4 scope):**
+- Speech onset before VAD threshold crossing is discarded — the first ~0.5s of quiet onset can be lost (this run dropped leading "Hexa is a"). If Gate 8's wake→capture shows this consistently, the fix is a small pre-roll ring buffer.
+- Transcription blocks the recognition loop ~1.9s after auto-stop; the queue (100 chunks = 8s) absorbs audio meanwhile. Gate 7 latency work / Gate 8 may need async transcription.
+- The capture stream takes ~3s from `start()` until the first chunks flow (device open + first window) — one-time warm-up.
+
+**Pytest:** 197 passed (full suite, 2:31).
+
+**USER CONFIRMATION:**
+- [x] Spoken run: auto-stop 1.59s, transcript fired, script verdict "GATE 4: PASS" (user pasted full output)
+
+---
+
+## Gate 5: Hotkey (Ctrl+Alt+Space)
+
 *In progress...*

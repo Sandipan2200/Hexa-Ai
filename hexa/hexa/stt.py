@@ -43,6 +43,7 @@ class SileroVAD:
     def __init__(self, threshold: float = 0.5) -> None:
         self.threshold = threshold
         self._model = None
+        self._residual = np.zeros(0, dtype=np.float32)  # samples not yet fed to the model
         self._load_model()
 
     def _load_model(self) -> None:
@@ -64,7 +65,15 @@ class SileroVAD:
                 self._model = None
 
     def get_speech_prob(self, chunk: np.ndarray, sample_rate: int = 16000) -> float:
-        """Get speech probability for a chunk."""
+        """Get speech probability for a chunk.
+
+        Silero is a STATEFUL recurrent model that must see contiguous
+        512-sample windows at 16kHz. Feeding it decimated or padded windows
+        (e.g. the first 512 samples of every 1280-sample chunk) corrupts its
+        internal state - Gate 4: probabilities up to 0.99 on room tone. So
+        buffer samples and feed the model contiguous 512-sample windows,
+        returning the max probability across this chunk's windows.
+        """
         if self._model is None:
             # Energy-based fallback
             if len(chunk) == 0:
@@ -73,25 +82,27 @@ class SileroVAD:
             return min(1.0, energy / 1000.0)
 
         try:
-            # Silero expects 512 samples at 16kHz
-            if hasattr(self._model, '__call__'):
-                # silero-vad package
-                import torch
-                tensor = torch.from_numpy(chunk.astype(np.float32) / 32768.0)
-                if len(tensor) != 512:
-                    # Resample or pad
-                    if len(tensor) > 512:
-                        tensor = tensor[:512]
-                    else:
-                        tensor = torch.nn.functional.pad(tensor, (0, 512 - len(tensor)))
-                with torch.no_grad():
-                    return float(self._model(tensor, sample_rate).item())
-            else:
-                # openWakeWord AudioFeatures
-                return float(self._model.get_vad_prob(chunk))
+            # silero-vad package
+            import torch
+            x = np.concatenate([self._residual, chunk.astype(np.float32) / 32768.0])
+            n_full = (len(x) // 512) * 512
+            self._residual = x[n_full:]
+            probs = []
+            with torch.no_grad():
+                for i in range(0, n_full, 512):
+                    tensor = torch.from_numpy(x[i:i + 512])
+                    probs.append(float(self._model(tensor, sample_rate).item()))
+            return max(probs) if probs else 0.0
         except Exception as e:
             logger.debug("VAD error: %s", e)
             return 0.0
+
+    def reset(self) -> None:
+        """Reset the recurrent state and residual buffer (call at utterance
+        boundaries so context does not bleed across unrelated segments)."""
+        self._residual = np.zeros(0, dtype=np.float32)
+        if self._model is not None and hasattr(self._model, "reset_states"):
+            self._model.reset_states()
 
 
 class WhisperTranscriber:
@@ -228,6 +239,7 @@ class SpeechRecognizer:
         else:
             logger.debug("Speech too short (%d chunks), discarding", len(self._speech_chunks))
         self._speech_chunks.clear()
+        self._vad.reset()  # utterance boundary: don't bleed recurrent state
 
     def _recognition_loop(self) -> None:
         """Main recognition loop with VAD."""
