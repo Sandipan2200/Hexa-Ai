@@ -46,7 +46,7 @@ memory:
 api:
   host: 127.0.0.1
   port: 8000
-  bearer_token: etwj9LUKrbpz44wwS50JlGu4lW0-fKvu54-ds7csnqc
+  bearer_token: ""  # Auto-generated on first run; DO NOT COMMIT
 # Optional: folders with portable apps / games to include in app discovery.
 # Add a folder once (e.g. D:\Games) and every .exe in it (one subfolder
 # deep) is discovered. Empty by default.

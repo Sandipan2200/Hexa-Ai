@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 hexa.log
 hexa.db
+hexa/config.yaml
 models/
 *.onnx
 *.onnx.json
