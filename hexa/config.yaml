@@ -47,14 +47,10 @@ api:
   host: 127.0.0.1
   port: 8000
   bearer_token: etwj9LUKrbpz44wwS50JlGu4lW0-fKvu54-ds7csnqc
-apps:
-  notepad: notepad.exe
-  calculator: calc.exe
-  explorer: explorer.exe
-  cmd: cmd.exe
-  powershell: powershell.exe
-  vscode: code.exe
-  chrome: chrome.exe
+# Optional: folders with portable apps / games to include in app discovery.
+# Add a folder once (e.g. D:\Games) and every .exe in it (one subfolder
+# deep) is discovered. Empty by default.
+extra_scan_folders: []
 sites:
   youtube: https://www.youtube.com
   gmail: https://mail.google.com
